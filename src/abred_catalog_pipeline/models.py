@@ -28,6 +28,27 @@ class ParsedChapter:
     media_url: str = ""
 
 
+
+
+@dataclass(slots=True)
+class ParsedTorrentFile:
+    index: int
+    path: str
+    size_bytes: int = 0
+    media_type: str = "audio"
+
+
+@dataclass(slots=True)
+class ParsedTorrent:
+    info_hash: str
+    magnet_uri: str = ""
+    torrent_url: str = ""
+    total_size_bytes: int = 0
+    seeders: int = 0
+    leechers: int = 0
+    files: list[ParsedTorrentFile] = field(default_factory=list)
+
+
 @dataclass(slots=True)
 class ParsedSeriesEntry:
     external_id: str
@@ -66,6 +87,7 @@ class ParsedBook:
     series_position: int | None = None
     series_entries: list[ParsedSeriesEntry] = field(default_factory=list)
     chapters: list[ParsedChapter] = field(default_factory=list)
+    torrent: ParsedTorrent | None = None
 
 
 class AudiobookSource(ABC):
@@ -101,6 +123,17 @@ def book_to_feed_record(book: ParsedBook, *, source: str) -> dict[str, Any]:
                 "position": book.series_position,
             }
         )
+    torrent = None
+    if book.torrent is not None:
+        torrent = {
+            "info_hash": book.torrent.info_hash,
+            "magnet_uri": book.torrent.magnet_uri,
+            "torrent_url": book.torrent.torrent_url,
+            "total_size_bytes": int(book.torrent.total_size_bytes or 0),
+            "seeders": int(book.torrent.seeders or 0),
+            "leechers": int(book.torrent.leechers or 0),
+            "files": [asdict(item) for item in book.torrent.files],
+        }
     return {
         "source": source,
         "external_id": book.external_id,
@@ -113,6 +146,9 @@ def book_to_feed_record(book: ParsedBook, *, source: str) -> dict[str, Any]:
         "authors": list(book.authors),
         "narrators": list(book.narrators),
         "genres": list(book.genres),
+        "metadata_fields_present": sorted(book.metadata_fields_present),
+        "metadata_complete": bool(book.metadata_complete),
         "series": series,
         "chapters": [asdict(chapter) for chapter in book.chapters],
+        "torrent": torrent,
     }

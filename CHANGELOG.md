@@ -1,13 +1,20 @@
 # Changelog
 
+## 0.1.1
+
+- Added RuTracker catalog pipeline through a Cloudflare Worker only; no direct GitHub runner -> RuTracker traffic.
+- Added production audiobook forum scope from the current backend.
+- Added independent per-forum `page 1 + five descending backfill pages` cursors.
+- Kept `topic_id` as the stable RuTracker source identity.
+- Ported the hardened production RuTracker `viewforum` and `viewtopic` metadata parsers.
+- Added magnet BTIH normalization, bencoded `.torrent` parsing, file metadata, and torrent-backed chapter generation.
+- Added mirror/fetch Worker modes and configurable token header, with `X-Proxy-Token` default.
+- Added `rutracker.yml` GitHub Actions workflow. Manual bounded runs do not advance cursors; scheduled runs remain disabled until `RUTRACKER_ENABLED=true`.
+- Feed records now support optional torrent metadata and explicit source metadata presence flags.
+
 ## 0.1.0
 
-- Separate GitHub catalog pipeline repository.
-- Audiopolka catalog/detail parser extracted from backend production logic.
-- Always scans page 1 plus five descending backfill pages.
-- Persistent `deep_page`/`last_page` cursor with wrap after page 2.
-- Source-native feed with no PostgreSQL IDs.
-- SHA-256 manifest for Backend 0.8.3.8 importer.
-- Explicit rightsholder removals are tombstones.
-- Preview-only content is rejected.
-- GitHub Actions schedule, artifact upload, and cursor commit.
+- Initial Audiopolka GitHub catalog pipeline.
+- Page 1 plus descending five-page backfill cursor.
+- Feed + manifest SHA-256 bundles.
+- Preview-only rejection and rightsholder tombstones.

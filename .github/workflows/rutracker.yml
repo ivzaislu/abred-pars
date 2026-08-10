@@ -1,0 +1,119 @@
+name: RuTracker catalog feed
+
+on:
+  workflow_dispatch:
+    inputs:
+      forums:
+        description: "Comma-separated forum IDs; blank = all configured audiobook forums"
+        required: false
+        default: "2387"
+        type: string
+      max_topics:
+        description: "Manual safety bound; 0 = unlimited. Truncated runs never advance cursors."
+        required: false
+        default: "5"
+        type: string
+      advance_cursor:
+        description: "Persist RuTracker cursor after a complete non-truncated run"
+        required: false
+        default: false
+        type: boolean
+      download_torrents:
+        description: "Fetch .torrent metainfo through the Worker for file metadata"
+        required: false
+        default: true
+        type: boolean
+  schedule:
+    - cron: "47 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rutracker-catalog-feed
+  cancel-in-progress: false
+
+env:
+  RUTRACKER_WORKER_URL: ${{ vars.RUTRACKER_WORKER_URL }}
+  RUTRACKER_WORKER_TOKEN: ${{ secrets.RUTRACKER_WORKER_TOKEN }}
+  RUTRACKER_WORKER_TOKEN_HEADER: ${{ vars.RUTRACKER_WORKER_TOKEN_HEADER || 'X-Proxy-Token' }}
+  RUTRACKER_WORKER_MODE: ${{ vars.RUTRACKER_WORKER_MODE || 'mirror' }}
+
+jobs:
+  crawl:
+    if: github.event_name == 'workflow_dispatch' || vars.RUTRACKER_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: pip install -e '.[test]'
+
+      - name: Tests
+        run: pytest -q
+
+      - name: Validate Worker configuration
+        shell: bash
+        run: |
+          test -n "$RUTRACKER_WORKER_URL" || { echo "Missing Actions variable RUTRACKER_WORKER_URL"; exit 1; }
+          test -n "$RUTRACKER_WORKER_TOKEN" || { echo "Missing Actions secret RUTRACKER_WORKER_TOKEN"; exit 1; }
+          echo "Worker URL configured: $RUTRACKER_WORKER_URL"
+          echo "Worker mode: $RUTRACKER_WORKER_MODE"
+          echo "Worker token header: $RUTRACKER_WORKER_TOKEN_HEADER"
+
+      - name: Crawl RuTracker through Worker
+        shell: bash
+        run: |
+          args=(
+            run-rutracker
+            --state state/rutracker.json
+            --out artifacts
+          )
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ -n "${{ inputs.forums }}" ]]; then
+              args+=(--forums "${{ inputs.forums }}")
+            fi
+            args+=(--max-topics "${{ inputs.max_topics }}")
+            if [[ "${{ inputs.advance_cursor }}" == "true" ]]; then
+              args+=(--advance-cursor)
+            fi
+            if [[ "${{ inputs.download_torrents }}" != "true" ]]; then
+              args+=(--no-torrent-download)
+            fi
+          else
+            args+=(--advance-cursor)
+          fi
+
+          python -m abred_catalog_pipeline "${args[@]}" | tee crawl-result.json
+
+      - name: Persist cursor
+        if: github.event_name == 'schedule' || inputs.advance_cursor == true
+        shell: bash
+        run: |
+          if git diff --quiet -- state/rutracker.json; then
+            echo "Cursor unchanged"
+            exit 0
+          fi
+          git config user.name "abred-catalog-bot"
+          git config user.email "abred-catalog-bot@users.noreply.github.com"
+          git add state/rutracker.json
+          git commit -m "catalog: advance RuTracker cursor"
+          git push
+
+      - name: Upload feed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rutracker-feed-${{ github.run_id }}
+          path: |
+            artifacts/**/feed.json
+            artifacts/**/manifest.json
+            crawl-result.json
+          if-no-files-found: error
+          retention-days: 14
