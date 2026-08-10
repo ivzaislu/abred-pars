@@ -1,0 +1,61 @@
+name: Audiopolka catalog feed
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: audiopolka-catalog-feed
+  cancel-in-progress: false
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: pip install -e '.[test]'
+
+      - name: Tests
+        run: pytest -q
+
+      - name: Crawl Audiopolka
+        run: |
+          python -m abred_catalog_pipeline run-audiopolka \
+            --state state/audiopolka.json \
+            --out artifacts \
+            | tee crawl-result.json
+
+      - name: Persist cursor
+        run: |
+          if git diff --quiet -- state/audiopolka.json; then
+            echo "Cursor unchanged"
+            exit 0
+          fi
+          git config user.name "abred-catalog-bot"
+          git config user.email "abred-catalog-bot@users.noreply.github.com"
+          git add state/audiopolka.json
+          git commit -m "catalog: advance Audiopolka cursor"
+          git push
+
+      - name: Upload feed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: audiopolka-feed-${{ github.run_id }}
+          path: |
+            artifacts/**/feed.json
+            artifacts/**/manifest.json
+            crawl-result.json
+          if-no-files-found: error
+          retention-days: 14
