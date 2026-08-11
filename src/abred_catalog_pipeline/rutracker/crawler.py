@@ -21,6 +21,7 @@ from .parser import (
 class ForumCursor:
     deep_page: int | None = None
     last_page: int | None = None
+    backfill_complete: bool = False
 
 
 @dataclass(slots=True)
@@ -40,13 +41,17 @@ class RuTrackerState:
             forums[str(key)] = ForumCursor(
                 deep_page=_positive_or_none(value.get("deep_page")),
                 last_page=_positive_or_none(value.get("last_page")),
+                backfill_complete=bool(value.get("backfill_complete", False)),
             )
         return cls(source="rutracker", forums=forums)
 
     def as_dict(self) -> dict:
         return {
             "source": "rutracker",
-            "forums": {key: asdict(value) for key, value in sorted(self.forums.items(), key=lambda item: int(item[0]))},
+            "forums": {
+                key: asdict(value)
+                for key, value in sorted(self.forums.items(), key=lambda item: int(item[0]))
+            },
         }
 
     def save(self, path: str | Path) -> None:
@@ -84,7 +89,7 @@ async def crawl_once(
     state: RuTrackerState,
     *,
     forum_ids: tuple[int, ...],
-    backfill_pages: int = 5,
+    backfill_pages: int = 1,
     max_topics: int = 0,
     download_torrents: bool = False,
     advance_cursor: bool = True,
@@ -104,12 +109,21 @@ async def crawl_once(
         first_url = parser.forum_url(forum_id, 1)
         first_html = await parser.get_html(first_url)
         last_page = detect_last_forum_page(first_html, forum_id=forum_id, page_size=parser.page_size)
-        pages, next_deep = plan_pages(
+        if last_page == 1 and before.last_page and before.last_page > 1:
+            last_page = before.last_page
+
+        pages, next_deep, backfill_complete = plan_pages(
             last_page=last_page,
             deep_page=before.deep_page,
             backfill_pages=backfill_pages,
+            backfill_complete=before.backfill_complete,
         )
-        page_trace.append({"forum_id": forum_id, "pages": pages, "last_page": last_page})
+        page_trace.append({
+            "forum_id": forum_id,
+            "pages": pages,
+            "last_page": last_page,
+            "backfill_complete": backfill_complete,
+        })
 
         for page in pages:
             html = first_html if page == 1 else await parser.get_html(parser.forum_url(forum_id, page))
@@ -127,17 +141,9 @@ async def crawl_once(
                     torrent_ref = book.torrent or ParsedTorrent(info_hash="", torrent_url=row.torrent_url)
                     torrent_ref.seeders = row.seeders
                     torrent_ref.leechers = row.leechers
-                    # The viewforum row already has the release size. Keep it as
-                    # a useful fallback even when raw .torrent metainfo cannot be
-                    # downloaded yet. Successful metainfo parsing replaces this
-                    # with the exact bencoded file-size sum below.
                     if not torrent_ref.total_size_bytes and row.size_bytes:
                         torrent_ref.total_size_bytes = row.size_bytes
 
-                    # Magnet/info-hash from viewtopic is the primary transport identity.
-                    # Raw .torrent metainfo is an optional enrichment only; a Worker
-                    # that cannot proxy dl.php must not turn a valid magnet record
-                    # into a rejected topic.
                     torrent_status = "magnet"
                     torrent_error = ""
                     if download_torrents:
@@ -155,7 +161,8 @@ async def crawl_once(
                             torrent.leechers = row.leechers
                             if torrent_ref.info_hash and torrent.info_hash != torrent_ref.info_hash:
                                 raise RuntimeError(
-                                    f"magnet/torrent info_hash mismatch: {torrent_ref.info_hash} != {torrent.info_hash}"
+                                    f"magnet/torrent info_hash mismatch: "
+                                    f"{torrent_ref.info_hash} != {torrent.info_hash}"
                                 )
                             book = hydrate_book_from_torrent(book, torrent)
                             torrent_status = "torrent_metainfo"
@@ -200,10 +207,12 @@ async def crawl_once(
             break
 
         if advance_cursor:
-            next_forums[forum_key] = ForumCursor(deep_page=next_deep, last_page=last_page)
+            next_forums[forum_key] = ForumCursor(
+                deep_page=next_deep,
+                last_page=last_page,
+                backfill_complete=backfill_complete,
+            )
 
-    # A bounded/manual probe must never advance deep cursors because the
-    # selected pages may have been only partially hydrated.
     if truncated or not advance_cursor:
         next_forums = dict(state.forums)
 

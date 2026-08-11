@@ -55,16 +55,18 @@ async def crawl_once(
     *,
     backfill_pages: int = 5,
 ) -> tuple[dict[str, Any], CrawlCursor]:
-    # Fetch page 1 once and reuse it for parsing + last-page detection.
     page1_url = parser.base_url + "/"
     page1_html = await parser._get(page1_url)
     last_page = detect_last_page(page1_html, parser.base_url)
     if last_page == 1 and cursor.last_page and cursor.last_page > 1:
-        # Pagination markup can occasionally be incomplete. Never collapse a
-        # known deep cursor merely because one response omitted page links.
         last_page = cursor.last_page
 
-    pages, next_deep = plan_pages(last_page=last_page, deep_page=cursor.deep_page, backfill_pages=backfill_pages)
+    pages, next_deep, backfill_complete = plan_pages(
+        last_page=last_page,
+        deep_page=cursor.deep_page,
+        backfill_pages=backfill_pages,
+        backfill_complete=cursor.backfill_complete,
+    )
     catalog_rows = []
     seen_ids: set[str] = set()
     for page in pages:
@@ -111,7 +113,12 @@ async def crawl_once(
                 "message": str(exc)[:500],
             })
 
-    next_cursor = CrawlCursor(source=parser.code, deep_page=next_deep, last_page=last_page)
+    next_cursor = CrawlCursor(
+        source=parser.code,
+        deep_page=next_deep,
+        last_page=last_page,
+        backfill_complete=backfill_complete,
+    )
     result = {
         "source": parser.code,
         "pages": pages,

@@ -58,7 +58,6 @@ async def _run_audiopolka(args: argparse.Namespace) -> int:
     return 0
 
 
-
 async def _run_rutracker(args: argparse.Namespace) -> int:
     cursor_path = Path(args.state)
     cursor = RuTrackerState.load(cursor_path)
@@ -121,7 +120,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="abred-catalog-pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run = sub.add_parser("run-audiopolka", help="crawl page 1 + descending backfill and emit a feed bundle")
+    run = sub.add_parser(
+        "run-audiopolka",
+        help="crawl page 1 + finite descending bootstrap and emit a feed bundle",
+    )
     run.add_argument("--state", default="state/audiopolka.json")
     run.add_argument("--out", default="artifacts")
     run.add_argument("--base-url", default="https://audiopolka.club")
@@ -129,18 +131,33 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--delay", type=float, default=0.35)
     run.add_argument("--run-id", default="")
 
-    rt = sub.add_parser("run-rutracker", help="crawl RuTracker viewforum/topic pages through Cloudflare Worker and emit a feed bundle")
+    rt = sub.add_parser(
+        "run-rutracker",
+        help="crawl RuTracker viewforum/topic pages through Cloudflare Worker and emit a feed bundle",
+    )
     rt.add_argument("--state", default="state/rutracker.json")
     rt.add_argument("--out", default="artifacts")
     rt.add_argument("--base-url", default="https://rutracker.org")
     rt.add_argument("--worker-url", default=os.environ.get("RUTRACKER_WORKER_URL", ""))
     rt.add_argument("--worker-token", default=os.environ.get("RUTRACKER_WORKER_TOKEN", ""))
-    rt.add_argument("--worker-token-header", default=os.environ.get("RUTRACKER_WORKER_TOKEN_HEADER", "X-Proxy-Token"))
-    rt.add_argument("--worker-mode", choices=("mirror", "fetch"), default=os.environ.get("RUTRACKER_WORKER_MODE", "mirror"))
+    rt.add_argument(
+        "--worker-token-header",
+        default=os.environ.get("RUTRACKER_WORKER_TOKEN_HEADER", "X-Proxy-Token"),
+    )
+    rt.add_argument(
+        "--worker-mode",
+        choices=("mirror", "fetch"),
+        default=os.environ.get("RUTRACKER_WORKER_MODE", "mirror"),
+    )
     rt.add_argument("--forums", default="")
     rt.add_argument("--page-size", type=int, default=50)
-    rt.add_argument("--backfill-pages", type=int, default=5)
-    rt.add_argument("--max-topics", type=int, default=0, help="manual probe bound; truncated runs never advance cursors")
+    rt.add_argument("--backfill-pages", type=int, default=1)
+    rt.add_argument(
+        "--max-topics",
+        type=int,
+        default=0,
+        help="manual probe bound; truncated runs never advance cursors",
+    )
     torrent_mode = rt.add_mutually_exclusive_group()
     torrent_mode.add_argument(
         "--download-torrents",
@@ -159,10 +176,11 @@ def build_parser() -> argparse.ArgumentParser:
     rt.add_argument("--delay", type=float, default=0.15)
     rt.add_argument("--run-id", default="")
 
-    plan = sub.add_parser("plan-pages", help="show page schedule without network")
+    plan = sub.add_parser("plan-pages", help="show finite page schedule without network")
     plan.add_argument("--last-page", type=int, required=True)
     plan.add_argument("--deep-page", type=int)
     plan.add_argument("--backfill-pages", type=int, default=5)
+    plan.add_argument("--backfill-complete", action="store_true")
     return parser
 
 
@@ -173,7 +191,16 @@ def main() -> int:
     if args.command == "run-rutracker":
         return asyncio.run(_run_rutracker(args))
     if args.command == "plan-pages":
-        pages, next_deep = plan_pages(last_page=args.last_page, deep_page=args.deep_page, backfill_pages=args.backfill_pages)
-        print(json.dumps({"pages": pages, "next_deep_page": next_deep}, indent=2))
+        pages, next_deep, backfill_complete = plan_pages(
+            last_page=args.last_page,
+            deep_page=args.deep_page,
+            backfill_pages=args.backfill_pages,
+            backfill_complete=args.backfill_complete,
+        )
+        print(json.dumps({
+            "pages": pages,
+            "next_deep_page": next_deep,
+            "backfill_complete": backfill_complete,
+        }, indent=2))
         return 0
     raise SystemExit(2)
