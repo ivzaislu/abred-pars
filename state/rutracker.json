@@ -1,4 +1,120 @@
 {
   "source": "rutracker",
-  "forums": {}
+  "forums": {
+    "399": {
+      "deep_page": 161,
+      "last_page": 162,
+      "backfill_complete": false
+    },
+    "400": {
+      "deep_page": 64,
+      "last_page": 65,
+      "backfill_complete": false
+    },
+    "402": {
+      "deep_page": 173,
+      "last_page": 174,
+      "backfill_complete": false
+    },
+    "403": {
+      "deep_page": 47,
+      "last_page": 48,
+      "backfill_complete": false
+    },
+    "467": {
+      "deep_page": 147,
+      "last_page": 148,
+      "backfill_complete": false
+    },
+    "490": {
+      "deep_page": 106,
+      "last_page": 107,
+      "backfill_complete": false
+    },
+    "499": {
+      "deep_page": 128,
+      "last_page": 129,
+      "backfill_complete": false
+    },
+    "530": {
+      "deep_page": 8,
+      "last_page": 9,
+      "backfill_complete": false
+    },
+    "574": {
+      "deep_page": 60,
+      "last_page": 61,
+      "backfill_complete": false
+    },
+    "661": {
+      "deep_page": 210,
+      "last_page": 211,
+      "backfill_complete": false
+    },
+    "695": {
+      "deep_page": 12,
+      "last_page": 13,
+      "backfill_complete": false
+    },
+    "716": {
+      "deep_page": 19,
+      "last_page": 20,
+      "backfill_complete": false
+    },
+    "1036": {
+      "deep_page": 53,
+      "last_page": 54,
+      "backfill_complete": false
+    },
+    "1350": {
+      "deep_page": 13,
+      "last_page": 14,
+      "backfill_complete": false
+    },
+    "2127": {
+      "deep_page": 23,
+      "last_page": 24,
+      "backfill_complete": false
+    },
+    "2137": {
+      "deep_page": 138,
+      "last_page": 139,
+      "backfill_complete": false
+    },
+    "2152": {
+      "deep_page": 19,
+      "last_page": 20,
+      "backfill_complete": false
+    },
+    "2165": {
+      "deep_page": 45,
+      "last_page": 46,
+      "backfill_complete": false
+    },
+    "2325": {
+      "deep_page": 28,
+      "last_page": 29,
+      "backfill_complete": false
+    },
+    "2342": {
+      "deep_page": null,
+      "last_page": 2,
+      "backfill_complete": true
+    },
+    "2348": {
+      "deep_page": 15,
+      "last_page": 16,
+      "backfill_complete": false
+    },
+    "2387": {
+      "deep_page": 393,
+      "last_page": 394,
+      "backfill_complete": false
+    },
+    "2388": {
+      "deep_page": 116,
+      "last_page": 117,
+      "backfill_complete": false
+    }
+  }
 }
