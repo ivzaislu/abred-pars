@@ -267,7 +267,7 @@ def _split_people(value: str) -> list[str]:
             continue
         if item not in out:
             out.append(item)
-    return out[:12]
+    return out
 
 
 def _post_field(post, labels: tuple[str, ...]) -> str:
@@ -524,7 +524,7 @@ def normalize_topic_subject_title(raw_topic_title: str, authors: list[str]) -> s
 
 _KNOWN_POST_LABELS = {
     "год выпуска", "автор", "авторы", "фамилия автора", "имя автора",
-    "исполнитель", "читает", "чтец", "жанр", "жанры", "прочитано по изданию",
+    "исполнитель", "исполнители", "читает", "чтец", "жанр", "жанры", "прочитано по изданию",
     "тип издания", "категория", "аудиокодек", "битрейт", "вид битрейта",
     "частота дискретизации", "количество каналов (моно-стерео)",
     "время звучания", "продолжительность", "описание", "доп. информация",
@@ -937,7 +937,7 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
         metadata_fields_present.add("title")
 
     author_labels = ("Автор", "Авторы", "Фамилия автора", "Имя автора")
-    narrator_labels = ("Исполнитель", "Читает", "Чтец")
+    narrator_labels = ("Исполнитель", "Исполнители", "Читает", "Чтец")
     genre_labels = ("Жанр", "Жанры")
     series_labels = ("Цикл/серия", "Цикл", "Серия")
     position_labels = ("Номер книги", "Номер в серии", "№ книги")
@@ -968,8 +968,8 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
 
     title = _select_topic_title(raw_topic_title, body_title, authors) or f"RuTracker {topic_id}"
     narrators = _split_people(
-        _post_field(post, ("Исполнитель", "Читает", "Чтец"))
-        or _label_value(post_text, ("Исполнитель", "Читает", "Чтец"))
+        _post_field(post, narrator_labels)
+        or _label_value(post_text, narrator_labels)
     )
     genre_value = _post_field(post, genre_labels) or _label_value(post_text, genre_labels)
     raw_genres = [_clean(x) for x in re.split(r"\s*[,;/]\s*", genre_value) if _clean(x)] if genre_value else []

@@ -300,3 +300,49 @@ def test_inferred_subject_author_list_is_split():
         "https://rutracker.org",
     )
     assert book.authors == ["Подгурский Игорь", "Романтовский Дмитрий"]
+
+
+def test_plural_performers_field_keeps_all_narrators():
+    expected = [
+        "Дарья Рублёва",
+        "Вася Аккерман",
+        "Евгений Харитонов",
+        "Галина Козинец",
+        "Сергей Зябко",
+        "Александр Новиков",
+        "Ирина Лачина",
+        "Шевченко Сергей",
+        "Кубракова Виталина",
+        "Тугова Анастасия",
+        "Мария Будрина",
+        "Евгений Петиш",
+        "Майя Грибоедова",
+        "Андрей Борисов",
+        "Светлана Тома",
+        "Марат Волошин",
+    ]
+    html = """
+    <html><body>
+      <h1 class="maintitle"><a id="topic-title">Потенциальные жертвы</a></h1>
+      <div class="post_body">
+        <span class="post-b">Фамилия автора</span>: Рублёва<br>
+        <span class="post-b">Имя автора</span>: Дарья<br>
+        <span class="post-b">Исполнители</span>:
+        Дарья Рублёва, Вася Аккерман, Евгений Харитонов, Галина Козинец,
+        Сергей Зябко, Александр Новиков, Ирина Лачина, Шевченко Сергей,
+        Кубракова Виталина, Тугова Анастасия, Мария Будрина, Евгений Петиш,
+        Майя Грибоедова, Андрей Борисов, Светлана Тома, Марат Волошин<br>
+        <span class="post-b">Жанр</span>: Фантастика, мистика, триллер<br>
+        <a class="magnet-link"
+           href="magnet:?xt=urn:btih:0123456789012345678901234567890123456789">magnet</a>
+      </div>
+    </body></html>
+    """
+    book = parse_topic_html(
+        html,
+        "https://rutracker.org/forum/viewtopic.php?t=6097671",
+        "https://rutracker.org",
+    )
+    assert book.narrators == expected
+    assert "narrators" in book.metadata_fields_present
+    assert book.genres == ["Фантастика", "мистика", "триллер"]
