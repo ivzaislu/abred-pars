@@ -251,7 +251,7 @@ def _normalize_person_item(value: str) -> str:
     # `(ЛИ)` is a RuTracker service/release marker, not part of a narrator
     # display name. Remove it only as a trailing parenthesized suffix so
     # legitimate aliases in parentheses remain untouched.
-    item = re.sub(r"(?i)\\s*\\(\\s*ЛИ\\s*\\)\\s*$", "", item).strip()
+    item = re.sub(r"(?i)\s*\(\s*ЛИ\s*\)\s*$", "", item).strip()
     if not item:
         return ""
 
