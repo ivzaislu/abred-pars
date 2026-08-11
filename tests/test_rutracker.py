@@ -346,3 +346,36 @@ def test_plural_performers_field_keeps_all_narrators():
     assert book.narrators == expected
     assert "narrators" in book.metadata_fields_present
     assert book.genres == ["Фантастика", "мистика", "триллер"]
+
+
+def test_legacy_combined_author_field_and_li_suffix():
+    html = """
+    <html><body>
+      <h1 class="maintitle">
+        <a id="topic-title">
+          Всеволод Слукин, Евгений Карташев Карташев - Смех по дороге в Атлантис
+          [Комиссар (ЛИ), 2013 г., 256 kbps, MP3]
+        </a>
+      </h1>
+      <div class="post_body">
+        <span style="font-size: 24px;">Смех по дороге в Атлантис</span><br>
+        <span class="post-b">Год выпуска</span>: 2013 г.<br>
+        <span class="post-b">Фамилия и имя автора</span>:
+        Всеволод Слукин, Евгений Карташев<br>
+        <span class="post-b">Исполнитель</span>: Комиссар (ЛИ)<br>
+        <span class="post-b">Жанр</span>: научно-фантастический рассказ<br>
+        <a class="magnet-link"
+           href="magnet:?xt=urn:btih:0123456789012345678901234567890123456789">magnet</a>
+      </div>
+    </body></html>
+    """
+    book = parse_topic_html(
+        html,
+        "https://rutracker.org/forum/viewtopic.php?t=4536901",
+        "https://rutracker.org",
+    )
+    assert book.authors == ["Всеволод Слукин", "Евгений Карташев"]
+    assert book.narrators == ["Комиссар"]
+    assert book.genres == ["научно-фантастический рассказ"]
+    assert "authors" in book.metadata_fields_present
+    assert "narrators" in book.metadata_fields_present

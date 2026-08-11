@@ -248,6 +248,13 @@ def _normalize_person_item(value: str) -> str:
     if marker in _STANDALONE_PEOPLE_NOISE:
         return ""
 
+    # `(ЛИ)` is a RuTracker service/release marker, not part of a narrator
+    # display name. Remove it only as a trailing parenthesized suffix so
+    # legitimate aliases in parentheses remain untouched.
+    item = re.sub(r"(?i)\\s*\\(\\s*ЛИ\\s*\\)\\s*$", "", item).strip()
+    if not item:
+        return ""
+
     # Remove only a sentence-ending dot after a full final token.
     # Initials such as "Райро А." remain unchanged.
     match = re.search(r"([A-Za-zА-Яа-яЁё-]+)\.$", item)
@@ -708,7 +715,10 @@ def _topic_display_title(post, raw_topic_title: str, authors: list[str] | None =
 
 
 def _topic_authors(post, post_text: str) -> list[str]:
-    direct = _post_field(post, ("Автор", "Авторы")) or _label_value(post_text, ("Автор", "Авторы"))
+    direct = (
+        _post_field(post, ("Автор", "Авторы", "Фамилия и имя автора"))
+        or _label_value(post_text, ("Автор", "Авторы", "Фамилия и имя автора"))
+    )
     if direct:
         return _split_people(direct)
     surname = _post_field(post, ("Фамилия автора",)) or _label_value(post_text, ("Фамилия автора",))
@@ -936,7 +946,7 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
     if raw_topic_title:
         metadata_fields_present.add("title")
 
-    author_labels = ("Автор", "Авторы", "Фамилия автора", "Имя автора")
+    author_labels = ("Автор", "Авторы", "Фамилия автора", "Имя автора", "Фамилия и имя автора")
     narrator_labels = ("Исполнитель", "Исполнители", "Читает", "Чтец")
     genre_labels = ("Жанр", "Жанры")
     series_labels = ("Цикл/серия", "Цикл", "Серия")
