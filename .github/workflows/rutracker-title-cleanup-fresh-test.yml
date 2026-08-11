@@ -1,0 +1,23 @@
+name: RuTracker title cleanup fresh test
+
+on:
+  push:
+    branches:
+      - assistant/rutracker-title-cleanup-fresh
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: assistant/rutracker-title-cleanup-fresh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Syntax check
+        run: python -m py_compile src/abred_catalog_pipeline/rutracker/parser.py tests/test_rutracker_title_cleanup.py
+      - name: Install tests
+        run: python -m pip install -e '.[test]'
+      - name: Run full tests
+        run: pytest -q
