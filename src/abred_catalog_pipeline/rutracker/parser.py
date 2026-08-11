@@ -229,6 +229,10 @@ def _label_value(text: str, labels: tuple[str, ...]) -> str:
     return ""
 
 
+def _normalized_post_label(value: str) -> str:
+    return _clean(value).rstrip(":：").strip().casefold()
+
+
 _STANDALONE_PEOPLE_NOISE = {
     "преподобный", "архимандрит", "диакон",
     "митрополит", "епископ", "архиепископ", "протоиерей",
@@ -280,9 +284,9 @@ def _split_people(value: str) -> list[str]:
 def _post_field(post, labels: tuple[str, ...]) -> str:
     if post is None:
         return ""
-    wanted = {x.casefold() for x in labels}
+    wanted = {_normalized_post_label(x) for x in labels}
     for bold in post.select("span.post-b"):
-        label = _clean(bold.get_text(" ", strip=True)).casefold()
+        label = _normalized_post_label(bold.get_text(" ", strip=True))
         if label not in wanted:
             continue
         values: list[str] = []
@@ -307,10 +311,10 @@ def _post_field(post, labels: tuple[str, ...]) -> str:
 
 
 def _post_field_present(post, post_text: str, labels: tuple[str, ...]) -> bool:
-    wanted = {x.casefold() for x in labels}
+    wanted = {_normalized_post_label(x) for x in labels}
     if post is not None:
         for bold in post.select("span.post-b"):
-            label = _clean(bold.get_text(" ", strip=True)).casefold()
+            label = _normalized_post_label(bold.get_text(" ", strip=True))
             if label in wanted:
                 return True
     for label in labels:
@@ -323,7 +327,7 @@ def _description_from_post(post) -> str:
     if post is None:
         return ""
     for bold in post.select("span.post-b"):
-        if _clean(bold.get_text(" ", strip=True)).casefold() != "описание":
+        if _normalized_post_label(bold.get_text(" ", strip=True)) != "описание":
             continue
         parts: list[str] = []
         node = bold.next_sibling
@@ -514,6 +518,29 @@ def normalize_topic_subject_title(raw_topic_title: str, authors: list[str]) -> s
             value = right
             break
 
+    if authors:
+        quote = re.match(r'^(.{2,100}?)\s*[«"“](.+)$', value)
+        if quote:
+            left = _clean(quote.group(1))
+            right = _clean(quote.group(2)).strip('«»"“” ')
+            if right and (
+                any(_same_person(left, author) for author in authors)
+                or _author_prefix_matches(left, authors)
+            ):
+                value = right
+        else:
+            for dot in re.finditer(r"\.\s+", value):
+                left = _clean(value[:dot.start() + 1])
+                right = _clean(value[dot.end():]).strip('«»"“” ')
+                if not right:
+                    continue
+                if (
+                    any(_same_person(left, author) for author in authors)
+                    or _author_prefix_matches(left, authors)
+                ):
+                    value = right
+                    break
+
     segments = re.split(r"\s+[-–—]\s*|\s*[-–—]\s+", value)
     if len(segments) >= 3:
         kept: list[str] = []
@@ -530,7 +557,8 @@ def normalize_topic_subject_title(raw_topic_title: str, authors: list[str]) -> s
 
 
 _KNOWN_POST_LABELS = {
-    "год выпуска", "автор", "авторы", "фамилия автора", "имя автора",
+    "год выпуска", "автор", "авторы", "aвтор", "aвторы",
+    "фамилия автора", "имя автора", "фамилия и имя автора", "фамилии авторов",
     "исполнитель", "исполнители", "читает", "чтец", "жанр", "жанры", "прочитано по изданию",
     "тип издания", "категория", "аудиокодек", "битрейт", "вид битрейта",
     "частота дискретизации", "количество каналов (моно-стерео)",
@@ -635,13 +663,44 @@ def _looks_like_strict_colon_person_prefix(value: str) -> bool:
 def _infer_author_from_subject(raw_topic_title: str, body_title: str) -> str:
     raw_value = _clean(raw_topic_title)
     value, _ = _strip_release_suffix(raw_topic_title)
+    body_clean, _ = _strip_release_suffix(body_title)
+    body_key, _ = _alnum_compact(body_clean)
+    value_key, _ = _alnum_compact(value)
+
+    def subject_match(right: str) -> bool:
+        right = _clean(right).strip('«»"“” ')
+        if not right:
+            return False
+        return (
+            _body_title_related_to_subject(body_title, right)
+            or _body_title_related_to_subject(right, body_title)
+            or bool(body_key and value_key and body_key == value_key)
+        )
+
     sep_re = re.compile(r"(?:\s+[-–—]\s*|\s*[-–—]\s+)")
     for match in sep_re.finditer(value):
         left = _clean(value[:match.start()])
         right = _clean(value[match.end():])
         if not left or not right or not _looks_like_person_prefix(left):
             continue
-        if _body_title_related_to_subject(body_title, right):
+        if subject_match(right):
+            return left
+
+    quote = re.match(r'^(.{2,100}?)\s*[«"“](.+)$', value)
+    if quote:
+        left = _clean(quote.group(1))
+        right = _clean(quote.group(2))
+        if _looks_like_person_prefix(left) and subject_match(right):
+            return left
+
+    # Old topics also use "Author. Title" and "Surname I.O. Title".
+    # Include the separator dot in the candidate so a final initial keeps it.
+    for match in re.finditer(r"\.\s+", value):
+        left = _clean(value[:match.start() + 1])
+        right = _clean(value[match.end():])
+        if not left or not right or not _looks_like_person_prefix(left):
+            continue
+        if subject_match(right):
             return left
 
     colon = re.match(r"^(.{2,100}?):\s+(.+)$", value)
@@ -658,6 +717,45 @@ def _infer_author_from_subject(raw_topic_title: str, body_title: str) -> str:
         ):
             return left
     return ""
+
+
+def _looks_like_subject_narrator(value: str, *, allow_single_alias: bool = False) -> bool:
+    text = _clean(value)
+    if not text or any(ch.isdigit() for ch in text) or _RELEASE_META_RE.search(text):
+        return False
+    if _looks_like_person_prefix(text):
+        return True
+    # One-word pseudonyms are ambiguous. Accept them only when the release
+    # explicitly carried the RuTracker (ЛИ) narrator marker.
+    return bool(
+        allow_single_alias
+        and re.fullmatch(r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё'’\-]{2,39}", text)
+    )
+
+
+def _infer_narrators_from_subject(raw_topic_title: str) -> list[str]:
+    value = _clean(raw_topic_title)
+    match = re.search(r"\[([^\[\]]*)\]\s*$", value)
+    if not match:
+        return []
+
+    release = _clean(match.group(1))
+    technical = _RELEASE_META_RE.search(release)
+    if not technical:
+        return []
+
+    people_segment = _clean(release[:technical.start()]).rstrip(" ,;/")
+    if not people_segment:
+        return []
+
+    had_li_marker = bool(re.search(r"(?i)\(\s*ЛИ\s*\)", people_segment))
+    out: list[str] = []
+    for candidate in _split_people(people_segment):
+        if not _looks_like_subject_narrator(candidate, allow_single_alias=had_li_marker):
+            continue
+        if candidate not in out:
+            out.append(candidate)
+    return out
 
 
 def _select_topic_title(raw_topic_title: str, body_title: str, authors: list[str]) -> str:
@@ -715,10 +813,11 @@ def _topic_display_title(post, raw_topic_title: str, authors: list[str] | None =
 
 
 def _topic_authors(post, post_text: str) -> list[str]:
-    direct = (
-        _post_field(post, ("Автор", "Авторы", "Фамилия и имя автора"))
-        or _label_value(post_text, ("Автор", "Авторы", "Фамилия и имя автора"))
+    direct_labels = (
+        "Автор", "Авторы", "Aвтор", "Aвторы",
+        "Фамилия и имя автора", "Фамилии авторов",
     )
+    direct = _post_field(post, direct_labels) or _label_value(post_text, direct_labels)
     if direct:
         return _split_people(direct)
     surname = _post_field(post, ("Фамилия автора",)) or _label_value(post_text, ("Фамилия автора",))
@@ -946,7 +1045,10 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
     if raw_topic_title:
         metadata_fields_present.add("title")
 
-    author_labels = ("Автор", "Авторы", "Фамилия автора", "Имя автора", "Фамилия и имя автора")
+    author_labels = (
+        "Автор", "Авторы", "Aвтор", "Aвторы",
+        "Фамилия автора", "Имя автора", "Фамилия и имя автора", "Фамилии авторов",
+    )
     narrator_labels = ("Исполнитель", "Исполнители", "Читает", "Чтец")
     genre_labels = ("Жанр", "Жанры")
     series_labels = ("Цикл/серия", "Цикл", "Серия")
@@ -981,6 +1083,8 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
         _post_field(post, narrator_labels)
         or _label_value(post_text, narrator_labels)
     )
+    if not narrators:
+        narrators = _infer_narrators_from_subject(raw_topic_title)
     genre_value = _post_field(post, genre_labels) or _label_value(post_text, genre_labels)
     raw_genres = [_clean(x) for x in re.split(r"\s*[,;/]\s*", genre_value) if _clean(x)] if genre_value else []
     series_genre_hint = ""

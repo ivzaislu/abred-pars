@@ -1,0 +1,2 @@
+[console_scripts]
+abred-catalog-pipeline = abred_catalog_pipeline.cli:main

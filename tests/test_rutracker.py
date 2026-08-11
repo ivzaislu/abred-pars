@@ -379,3 +379,127 @@ def test_legacy_combined_author_field_and_li_suffix():
     assert book.genres == ["научно-фантастический рассказ"]
     assert "authors" in book.metadata_fields_present
     assert "narrators" in book.metadata_fields_present
+
+
+def test_legacy_mixed_latin_author_label_is_parsed():
+    html = """
+    <html><body>
+      <h1 class="maintitle"><a id="topic-title">Вайн Барбара - Пятьдесят оттенков темноты[Кирсанов Сергей, 2015 г., 128 kbps, MP3]</a></h1>
+      <div class="post_body">
+        <span class="post-b">Aвтор</span>: Вайн Барбара<br>
+        <span class="post-b">Исполнитель</span>: Кирсанов Сергей<br>
+        <a class="magnet-link" href="magnet:?xt=urn:btih:0123456789012345678901234567890123456789">magnet</a>
+      </div>
+    </body></html>
+    """
+    book = parse_topic_html(html, "https://rutracker.org/forum/viewtopic.php?t=5158225", "https://rutracker.org")
+    assert book.authors == ["Вайн Барбара"]
+    assert book.narrators == ["Кирсанов Сергей"]
+
+
+def test_legacy_plural_surname_author_label_and_li_narrator():
+    html = """
+    <html><body>
+      <h1 class="maintitle"><a id="topic-title">Хэйнс Дороти К., Матесон Ричард, Кинг Стивен - Ведьма [Владимир Князев(ЛИ), 2012 г., 256, MP3]</a></h1>
+      <div class="post_body">
+        <span class="post-b">Фамилии авторов</span>: Хэйнс Дороти К., Матесон Ричард, Кинг Стивен<br>
+        <span class="post-b">Исполнитель</span>: Владимир Князев(ЛИ)<br>
+        <a class="magnet-link" href="magnet:?xt=urn:btih:0123456789012345678901234567890123456789">magnet</a>
+      </div>
+    </body></html>
+    """
+    book = parse_topic_html(html, "https://rutracker.org/forum/viewtopic.php?t=4153936", "https://rutracker.org")
+    assert book.authors == ["Хэйнс Дороти К.", "Матесон Ричард", "Кинг Стивен"]
+    assert book.narrators == ["Владимир Князев"]
+
+
+def test_bold_label_with_embedded_colon_is_recognized():
+    html = """
+    <html><body>
+      <h1 class="maintitle"><a id="topic-title">Фаулз Джон &quot;Коллекционер&quot; [А.Хорлин, Е.Морозова, 2005, 192 кбит/с]</a></h1>
+      <div class="post_body">
+        <span style="font-size:24px">Джон Фаулз &quot;Коллекционер&quot;</span><br>
+        <span class="post-b">Исполнители:</span> Александр Хорлин, Елена Морозова<br>
+        <span class="post-b">Описание:</span> Тестовое описание книги.<br>
+        <a class="magnet-link" href="magnet:?xt=urn:btih:0123456789012345678901234567890123456789">magnet</a>
+      </div>
+    </body></html>
+    """
+    book = parse_topic_html(html, "https://rutracker.org/forum/viewtopic.php?t=545082", "https://rutracker.org")
+    assert book.authors == ["Фаулз Джон"]
+    assert book.narrators == ["Александр Хорлин", "Елена Морозова"]
+    assert book.title == "Коллекционер"
+
+
+def test_strict_legacy_author_fallback_formats():
+    cases = [
+        ('Евгений Весник &quot;Хмельные странички&quot; [Евгений Весник, 256 кбит/с]', 'Евгений Весник &quot;Хмельные странички&quot;', ["Евгений Весник"], "Хмельные странички"),
+        ('Кинки Фридман. &quot;Убийство по Гринвичу&quot;', 'Кинки Фридман. &quot;Убийство по Гринвичу&quot;', ["Кинки Фридман"], "Убийство по Гринвичу"),
+        ("Мигель Де Сервантес Сааведра. Дон Кихот", "Мигель Де Сервантес Сааведра. Дон Кихот", ["Мигель Де Сервантес Сааведра"], "Дон Кихот"),
+        ("Пушкин А.С. Евгений Онегин [Иннокентий Смоктуновский, 2005, 192 kbps]", "Пушкин А.С. Евгений Онегин", ["Пушкин А.С."], "Евгений Онегин"),
+        ("Киплинг Редьярд - Рикша-призрак. В кратере [А. Смоляков, М. Шашлова, М. Станкевич, 2010 г., 160 kbps, MP3]", "Рикша-призрак. В кратере", ["Киплинг Редьярд"], "Рикша-призрак. В кратере"),
+    ]
+    for index, (subject, body_title, authors, title) in enumerate(cases):
+        html = f"""
+        <html><body>
+          <h1 class="maintitle"><a id="topic-title">{subject}</a></h1>
+          <div class="post_body">
+            <span style="font-size:24px">{body_title}</span><br>
+            <a class="magnet-link" href="magnet:?xt=urn:btih:0123456789012345678901234567890123456789">magnet</a>
+          </div>
+        </body></html>
+        """
+        book = parse_topic_html(html, f"https://rutracker.org/forum/viewtopic.php?t={9000000 + index}", "https://rutracker.org")
+        assert book.authors == authors
+        assert book.title == title
+
+
+def test_subject_narrator_fallback_is_conservative():
+    cases = [
+        ('Джеффри Дж.Фокс &quot;Как стать Волшебником Продаж&quot; [Виктор Петров, 2007]', ["Виктор Петров"]),
+        ('Евгений Весник &quot;Хмельные странички&quot; [Евгений Весник, 256 кбит/с]', ["Евгений Весник"]),
+        ("А.А.Ахматова - Стихотворения и поэма [И.Чурикова, А.Покровская, О.Остроумова и др., 2007, 192 кБ/с]", ["И.Чурикова", "А.Покровская", "О.Остроумова"]),
+        ("Тестовая книга [Комиссар (ЛИ), 2013 г., 256 kbps, MP3]", ["Комиссар"]),
+    ]
+    for index, (subject, expected) in enumerate(cases):
+        html = f"""
+        <html><body>
+          <h1 class="maintitle"><a id="topic-title">{subject}</a></h1>
+          <div class="post_body">
+            <span style="font-size:24px">Тестовая книга</span><br>
+            <a class="magnet-link" href="magnet:?xt=urn:btih:0123456789012345678901234567890123456789">magnet</a>
+          </div>
+        </body></html>
+        """
+        book = parse_topic_html(html, f"https://rutracker.org/forum/viewtopic.php?t={9100000 + index}", "https://rutracker.org")
+        assert book.narrators == expected
+
+
+def test_explicit_narrators_win_over_subject_fallback():
+    html = """
+    <html><body>
+      <h1 class="maintitle"><a id="topic-title">Фаулз Джон &quot;Коллекционер&quot; [А.Хорлин, Е.Морозова, 2005, 192 кбит/с]</a></h1>
+      <div class="post_body">
+        <span class="post-b">Исполнители:</span> Александр Хорлин, Елена Морозова<br>
+        <a class="magnet-link" href="magnet:?xt=urn:btih:0123456789012345678901234567890123456789">magnet</a>
+      </div>
+    </body></html>
+    """
+    book = parse_topic_html(html, "https://rutracker.org/forum/viewtopic.php?t=545082", "https://rutracker.org")
+    assert book.narrators == ["Александр Хорлин", "Елена Морозова"]
+
+
+def test_subject_fallback_refuses_non_person_va_release():
+    html = """
+    <html><body>
+      <h1 class="maintitle"><a id="topic-title">(musical performance, audio fantacy) VA - Мокрые Уши. Гоголь. - 2014, MP3, 320 kbps</a></h1>
+      <div class="post_body">
+        <span style="font-size:24px">Мокрые Уши. Гоголь.</span><br>
+        <span class="post-b">Жанр</span>: musical performance, audio fantacy<br>
+        <a class="magnet-link" href="magnet:?xt=urn:btih:0123456789012345678901234567890123456789">magnet</a>
+      </div>
+    </body></html>
+    """
+    book = parse_topic_html(html, "https://rutracker.org/forum/viewtopic.php?t=4809802", "https://rutracker.org")
+    assert book.authors == []
+    assert book.narrators == []
