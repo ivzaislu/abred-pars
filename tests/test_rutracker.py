@@ -80,7 +80,11 @@ def test_torrent_metainfo_builds_file_list_and_chapters():
         "https://rutracker.org/forum/viewtopic.php?t=6862086",
         "https://rutracker.org",
     )
-    torrent = parse_torrent_bytes(_torrent_fixture(), magnet_uri="", torrent_url="https://rutracker.org/forum/dl.php?t=1")
+    torrent = parse_torrent_bytes(
+        _torrent_fixture(),
+        magnet_uri="",
+        torrent_url="https://rutracker.org/forum/dl.php?t=1",
+    )
     hydrate_book_from_torrent(book, torrent)
     assert torrent.total_size_bytes == 3300
     assert [(x.index, x.path, x.media_type) for x in torrent.files] == [
@@ -96,7 +100,9 @@ def test_torrent_metainfo_builds_file_list_and_chapters():
 
 
 def test_worker_mirror_keeps_path_query_and_token_header():
-    parser = RuTrackerWorkerClient(worker_url="https://worker.example", worker_token="secret", delay_seconds=0)
+    parser = RuTrackerWorkerClient(
+        worker_url="https://worker.example", worker_token="secret", delay_seconds=0
+    )
     try:
         target = "https://rutracker.org/forum/viewforum.php?f=2387&start=50"
         assert parser._request_url(target) == "https://worker.example/forum/viewforum.php?f=2387&start=50"
@@ -125,13 +131,13 @@ def test_worker_authorization_and_fetch_mode():
 
 
 def test_last_page_detection_uses_start_offsets_and_text():
-    html = '''
+    html = """
     <html><body>
       <a href="viewforum.php?f=2387&start=50">2</a>
       <a href="viewforum.php?f=2387&start=4950">100</a>
       <div>Страница 1 из 100</div>
     </body></html>
-    '''
+    """
     assert detect_last_forum_page(html, forum_id=2387, page_size=50) == 100
 
 
@@ -162,7 +168,9 @@ def test_worker_torrent_request_sends_topic_referer():
         delay_seconds=0,
     )
     old_client = parser.client
-    parser.client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True)
+    parser.client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), follow_redirects=True
+    )
     asyncio.run(old_client.aclose())
     try:
         data = asyncio.run(
@@ -262,3 +270,33 @@ def test_optional_torrent_failure_falls_back_to_magnet_without_rejecting_topic()
     assert record["rutracker"]["torrent_metadata_status"] == "magnet_fallback"
     assert record["rutracker"]["torrent_metadata_attempted"] is True
     assert "403 Forbidden" in record["rutracker"]["torrent_metadata_error"]
+
+
+def test_people_normalization_filters_service_marker_and_keeps_initials():
+    from abred_catalog_pipeline.rutracker.parser import _split_people
+
+    assert _split_people("Кочергина Елена, (ЛИ)") == ["Кочергина Елена"]
+    assert _split_people("Роман Злотников.") == ["Роман Злотников"]
+    assert _split_people("Райро А.") == ["Райро А."]
+
+
+def test_inferred_subject_author_list_is_split():
+    html = """
+    <html><body>
+      <h1 class="maintitle">
+        <a id="topic-title">Подгурский Игорь, Романтовский Дмитрий - На суше и на море [2020, MP3]</a>
+      </h1>
+      <div class="post_body">
+        <span class="post-align">На суше и на море</span>
+        <span class="post-b">Исполнитель</span>: Иван Иванов<br>
+        <a class="magnet-link"
+           href="magnet:?xt=urn:btih:0123456789012345678901234567890123456789">magnet</a>
+      </div>
+    </body></html>
+    """
+    book = parse_topic_html(
+        html,
+        "https://rutracker.org/forum/viewtopic.php?t=5007473",
+        "https://rutracker.org",
+    )
+    assert book.authors == ["Подгурский Игорь", "Романтовский Дмитрий"]

@@ -24,8 +24,6 @@ _AUDIO_EXTS = {".mp3", ".m4a", ".m4b", ".aac", ".ogg", ".opus", ".flac", ".wav",
 _TOPIC_ID_RE = re.compile(r"(?:[?&]t=|/t)(\d+)")
 _NUMBER_RE = re.compile(r"\d+")
 
-# Explicit AudioBookRed RuTracker catalog supplied by the project owner.
-# Keep this source scoped to audiobook sections only.
 DEFAULT_AUDIOBOOK_FORUM_IDS = (
     574, 1036, 400, 2388, 2387, 661, 2348, 2127,
     2137, 499, 490, 467, 402, 399, 695, 2152,
@@ -58,14 +56,6 @@ def _clean(value: str) -> str:
 
 
 def _node_text(node) -> str:
-    """Read RuTracker text while treating ``<wbr>`` as a zero-width break.
-
-    ``get_text(" ")`` is normally desirable because adjacent inline elements
-    still need a visible separator.  RuTracker also inserts ``<wbr>`` inside
-    long words, however, and BeautifulSoup would turn that marker into a real
-    space.  Remove only the wbr markup first, then let BeautifulSoup preserve
-    normal element boundaries.
-    """
     if node is None:
         return ""
     markup = re.sub(r"(?is)<wbr\b[^>]*>", "", str(node))
@@ -74,7 +64,6 @@ def _node_text(node) -> str:
 
 
 def _decode_html(content: bytes, response_encoding: str | None = None) -> str:
-    # RuTracker pages in the supplied real fixtures declare windows-1251.
     for enc in (response_encoding, "cp1251", "utf-8"):
         if not enc:
             continue
@@ -95,7 +84,6 @@ def _topic_id(url: str) -> str:
 
 
 def _info_hash_from_magnet(magnet_uri: str) -> str:
-    """Return a normalized 40-char hex BTIH from a magnet URI when present."""
     if not magnet_uri:
         return ""
     try:
@@ -164,7 +152,6 @@ def _duration_seconds(raw: str) -> int:
 
 
 def parse_tracker_html(html: str, base_url: str) -> list[TrackerRow]:
-    """Parse tracker.php result rows retained for source-side search compatibility."""
     soup = BeautifulSoup(html, "html.parser")
     rows: list[TrackerRow] = []
     for row in soup.select("table#tor-tbl > tbody > tr"):
@@ -192,26 +179,14 @@ def parse_tracker_html(html: str, base_url: str) -> list[TrackerRow]:
         seeders = _int(seed_cell.get_text(" ", strip=True)) if seed_cell and "дн" not in seed_cell.get_text(" ").casefold() else 0
         leechers = _int(leech_cell.get_text(" ", strip=True)) if leech_cell else 0
         rows.append(TrackerRow(
-            topic_id=topic_id,
-            topic_url=topic_url,
-            torrent_url=torrent_url,
-            title=_node_text(details),
-            forum_id=forum_id,
-            forum_name=forum_name,
-            size_bytes=_size_bytes(size_raw),
-            seeders=seeders,
-            leechers=leechers,
+            topic_id=topic_id, topic_url=topic_url, torrent_url=torrent_url,
+            title=_node_text(details), forum_id=forum_id, forum_name=forum_name,
+            size_bytes=_size_bytes(size_raw), seeders=seeders, leechers=leechers,
         ))
     return rows
 
 
 def parse_forum_html(html: str, base_url: str, forum_id: str | int = "") -> list[TrackerRow]:
-    """Parse the real viewforum.php audiobook list.
-
-    The supplied RuTracker page uses table.vf-table rows with a.torTopic and
-    dl.php?t=... links. Rows without a downloadable torrent (announcements,
-    notices, moderation-only topics) are intentionally excluded.
-    """
     soup = BeautifulSoup(html, "html.parser")
     inferred_forum = str(forum_id or "")
     if not inferred_forum:
@@ -237,12 +212,8 @@ def parse_forum_html(html: str, base_url: str, forum_id: str | int = "") -> list
         seeds = row.select_one(".seedmed")
         leeches = row.select_one(".leechmed")
         out.append(TrackerRow(
-            topic_id=topic_id,
-            topic_url=topic_url,
-            torrent_url=torrent_url,
-            title=_node_text(details),
-            forum_id=inferred_forum,
-            forum_name=forum_name,
+            topic_id=topic_id, topic_url=topic_url, torrent_url=torrent_url,
+            title=_node_text(details), forum_id=inferred_forum, forum_name=forum_name,
             size_bytes=_size_bytes(download.get_text(" ", strip=True)),
             seeders=_int(seeds.get_text(" ", strip=True)) if seeds else 0,
             leechers=_int(leeches.get_text(" ", strip=True)) if leeches else 0,
@@ -252,8 +223,6 @@ def parse_forum_html(html: str, base_url: str, forum_id: str | int = "") -> list
 
 def _label_value(text: str, labels: tuple[str, ...]) -> str:
     for label in labels:
-        # Real RuTracker post markup places the bold label and ': value' on
-        # adjacent text lines. Accept both same-line and next-line forms.
         m = re.search(rf"(?im)^\s*{re.escape(label)}\s*(?:\n\s*)?[:：]\s*(.+?)\s*$", text)
         if m:
             return _clean(m.group(1))
@@ -261,25 +230,40 @@ def _label_value(text: str, labels: tuple[str, ...]) -> str:
 
 
 _STANDALONE_PEOPLE_NOISE = {
-    # Honorifics / clerical ranks occasionally leak out as their own list
-    # entries when an old RuTracker template separates them with commas.
-    # Keep ranks when they are part of a full display name; filter only an
-    # entry that consists solely of the service word.
     "преподобный", "архимандрит", "диакон",
     "митрополит", "епископ", "архиепископ", "протоиерей",
     "иеромонах", "священник", "отец",
-    # Collection shorthand is not a person.
     "др", "др.", "другие",
+    # Service marker seen in RuTracker narrator metadata, not a person.
+    "ли",
 }
+
+
+def _normalize_person_item(value: str) -> str:
+    item = _clean(value)
+    if not item:
+        return ""
+
+    marker = item.strip("()[]{}<>«»\"' .,:;").casefold()
+    if marker in _STANDALONE_PEOPLE_NOISE:
+        return ""
+
+    # Remove only a sentence-ending dot after a full final token.
+    # Initials such as "Райро А." remain unchanged.
+    match = re.search(r"([A-Za-zА-Яа-яЁё-]+)\.$", item)
+    if match and len(match.group(1)) > 1:
+        item = item[:-1].rstrip()
+
+    return item
 
 
 def _split_people(value: str) -> list[str]:
     if not value:
         return []
     out: list[str] = []
-    for item in re.split(r"\s*(?:,|;|/| и )\s*", value):
-        item = _clean(item)
-        if not item or item.casefold() in _STANDALONE_PEOPLE_NOISE:
+    for raw_item in re.split(r"\s*(?:,|;|/| и )\s*", value):
+        item = _normalize_person_item(raw_item)
+        if not item:
             continue
         if item not in out:
             out.append(item)
@@ -316,12 +300,6 @@ def _post_field(post, labels: tuple[str, ...]) -> str:
 
 
 def _post_field_present(post, post_text: str, labels: tuple[str, ...]) -> bool:
-    """Return whether a RuTracker metadata label is explicitly present.
-
-    Presence is deliberately separate from value parsing: repair code must not
-    interpret a missing field on a partial/error page as an authoritative empty
-    value.
-    """
     wanted = {x.casefold() for x in labels}
     if post is not None:
         for bold in post.select("span.post-b"):
@@ -371,7 +349,6 @@ _RELEASE_META_RE = re.compile(
     r")"
 )
 
-
 _AUTHOR_PREFIX_NOISE = {
     "и", "др", "and", "et", "al",
     "митрополит", "епископ", "архиепископ", "архимандрит", "протоиерей",
@@ -380,7 +357,6 @@ _AUTHOR_PREFIX_NOISE = {
 
 
 def _person_key(value: str) -> tuple[str, ...]:
-    """Normalize a displayed person name for conservative author-prefix matching."""
     return tuple(sorted(re.findall(r"[a-zа-яё0-9]+", _clean(value).casefold(), flags=re.I)))
 
 
@@ -397,10 +373,6 @@ def _same_person(left: str, person: str) -> bool:
 def _token_close(left: str, right: str) -> bool:
     if left == right:
         return True
-    # Legacy topics freely mix full given names with initials.  Treat a
-    # one-letter token as an initial only when it agrees with the first
-    # letter of the full token; this is conservative enough for person names
-    # and fixes e.g. ``Пушкин Александр`` vs ``Пушкин А.С.``.
     if len(left) == 1 < len(right):
         return right.startswith(left)
     if len(right) == 1 < len(left):
@@ -411,15 +383,6 @@ def _token_close(left: str, right: str) -> bool:
 
 
 def _author_prefix_matches(left: str, authors: list[str]) -> bool:
-    """Match a subject prefix to one or several parsed authors.
-
-    RuTracker subjects are old and inconsistent: spaces can be inserted by
-    soft-break markup (``Реверт е``), one letter may be missing in a name,
-    honorifics/aliases may be present, initials may replace full given names,
-    and author order may differ from the metadata field.  Match each
-    meaningful prefix token to an author token with a very small fuzzy
-    tolerance, while still refusing unrelated title fragments.
-    """
     author_tokens = [
         token
         for author in authors
@@ -429,9 +392,6 @@ def _author_prefix_matches(left: str, authors: list[str]) -> bool:
     if not author_tokens:
         return False
 
-    # Parenthesised aliases/titles often follow an otherwise exact author
-    # name: ``Трунгпа Чогъям (Чогьям Трунгпа Ринпоче)``.  Try the complete
-    # display string as well as the text outside / before the parentheses.
     variants = [left]
     without_parens = _clean(re.sub(r"\([^()]*\)", " ", left))
     before_paren = _clean(left.split("(", 1)[0])
@@ -442,18 +402,12 @@ def _author_prefix_matches(left: str, authors: list[str]) -> bool:
     for variant in variants:
         ordered = [x for x in _person_tokens_ordered(variant) if x not in _AUTHOR_PREFIX_NOISE]
         token_variants: list[list[str]] = [ordered]
-        # RuTracker inserts soft breaks inside long words.  If a displayed
-        # author contains ``Ге нрих`` while metadata contains ``Генрих``, try
-        # only adjacent-token merges that are actually explained by an author
-        # token.  This avoids globally gluing normal multi-word names.
         for pos in range(max(0, len(ordered) - 1)):
             merged = ordered[pos] + ordered[pos + 1]
             if any(_token_close(merged, candidate) for candidate in author_tokens):
                 token_variants.append(ordered[:pos] + [merged] + ordered[pos + 2:])
 
         for left_tokens in token_variants:
-            # Duplicate author tokens occur in malformed legacy subjects such as
-            # ``Акунин Борис Акунин - ...``.  They add no identity information.
             deduped: list[str] = []
             for token in left_tokens:
                 if token not in deduped:
@@ -477,22 +431,12 @@ def _author_prefix_matches(left: str, authors: list[str]) -> bool:
                 used.add(hit)
                 matched += 1
             else:
-                # Two explained tokens are enough for a person name; a one-token
-                # author remains accepted only on an exact/fuzzy token match.
                 if matched >= min(2, len(meaningful)):
                     return True
     return False
 
 
 def _strip_release_suffix(raw_topic_title: str) -> tuple[str, bool]:
-    """Remove RuTracker release metadata appended to a human book title.
-
-    Audiobook topic names commonly end in one or more square-bracket groups,
-    e.g. ``[Мария Орлова, 2026, 128 kbps, MP3]``.  We only start stripping
-    when a group contains an unmistakable release marker (year, bitrate, audio
-    format, etc.).  A few legacy topics append a short explanatory note after
-    that release block; that whole technical tail is removed as one unit.
-    """
     value = _clean(raw_topic_title)
     removed_release_group = False
     while value:
@@ -505,19 +449,11 @@ def _strip_release_suffix(raw_topic_title: str) -> tuple[str, bool]:
         value = _clean(value[:match.start()])
         removed_release_group = True
 
-    # A few releases use parenthesis for the technical suffix instead of [];
-    # keep this conservative and remove it only when it contains a marker.
     match = re.search(r"\s*\(([^()]*)\)\s*$", value)
     if match and _RELEASE_META_RE.search(_clean(match.group(1))):
         value = _clean(value[:match.start()])
         removed_release_group = True
 
-    # Legacy subjects sometimes append a correction/narrator note *after* a
-    # normal release block, for example
-    # ``Title [Reader, 2026, 96 kbps, MP3] (Other reader) - указан ...``.
-    # The note prevents the simple trailing-group loop above from seeing the
-    # release block.  Strip it only when the bracket itself is unmistakably
-    # technical and the following text has the shape of a short annotation.
     if not removed_release_group:
         for candidate in re.finditer(r"\s*\[([^\[\]]*)\]", value):
             if not _RELEASE_META_RE.search(_clean(candidate.group(1))):
@@ -533,11 +469,6 @@ def _strip_release_suffix(raw_topic_title: str) -> tuple[str, bool]:
                 removed_release_group = True
                 break
 
-    # Very old RuTracker subjects also used slash-separated release metadata
-    # instead of brackets, for example ``Title / 2007 / MP3 / 64 kbps``.
-    # Strip only a run of at least two *consecutive trailing* technical
-    # segments.  That keeps normal bilingual/alternate titles containing a
-    # slash intact while removing unmistakable release tails.
     parts = re.split(r"\s*/\s*", value)
     technical_tail = 0
     if len(parts) >= 3:
@@ -552,8 +483,6 @@ def _strip_release_suffix(raw_topic_title: str) -> tuple[str, bool]:
             removed_release_group = True
 
     if removed_release_group:
-        # Removing release metadata from ``Book 1, [release]`` must not leave
-        # a dangling catalogue separator behind.
         value = re.sub(r"[\s,;:/\-–—]+$", "", value)
     return _clean(value), removed_release_group
 
@@ -564,26 +493,8 @@ _GENERIC_SUBJECT_PREFIX_RE = re.compile(
 
 
 def normalize_topic_subject_title(raw_topic_title: str, authors: list[str]) -> str:
-    """Turn a RuTracker subject into a clean work title when body metadata lacks it.
-
-    Example:
-      ``Барро Сандра - Забытая жена [Мария Орлова, 2026, 128 kbps, MP3]``
-      -> ``Забытая жена``
-
-    The author prefix is removed only when it matches an author parsed from
-    the post itself, so a legitimate dash inside a title is not guessed away.
-    Older topics also use ``Автор: Название`` or omit the space before a dash.
-    """
     value, _ = _strip_release_suffix(raw_topic_title)
-
-    # A few old subjects carry a generic rubric before the real title.  This
-    # is navigation noise, not part of the work title.
     value = _GENERIC_SUBJECT_PREFIX_RE.sub("", value, count=1)
-
-    # Consider only separator forms that visually divide a prefix from a title:
-    # a dash with whitespace on at least one side, or a colon followed by space.
-    # This deliberately does not split hyphenated surnames such as
-    # ``Перес-Реверте``.
     sep_re = re.compile(r"(?:\s+[-–—]\s*|\s*[-–—]\s+|:\s+)")
     for match in sep_re.finditer(value):
         left = _clean(value[:match.start()])
@@ -596,10 +507,6 @@ def normalize_topic_subject_title(raw_topic_title: str, authors: list[str]) -> s
             value = right
             break
 
-    # Some old collection subjects insert the author between a rubric/series
-    # and the work title: ``Жемчужины мудрости - Ледбитер Ч. У. - Ясновидение``.
-    # Remove only a whole separator-delimited segment that matches a parsed
-    # author, preserving both the collection prefix and the actual title.
     segments = re.split(r"\s+[-–—]\s*|\s*[-–—]\s+", value)
     if len(segments) >= 3:
         kept: list[str] = []
@@ -627,20 +534,12 @@ _KNOWN_POST_LABELS = {
 
 def _title_tokens(value: str) -> set[str]:
     return {
-        token
-        for token in re.findall(r"[a-zа-яё0-9]+", _clean(value).casefold(), flags=re.I)
+        token for token in re.findall(r"[a-zа-яё0-9]+", _clean(value).casefold(), flags=re.I)
         if len(token) > 1
     }
 
 
 def _body_title_related_to_subject(body_title: str, subject_title: str) -> bool:
-    """Return true only when a post-body title clearly describes the subject.
-
-    RuTracker templates are inconsistent: the first body heading can be a
-    clean subtitle, but it can also be an author alias or another unrelated
-    line.  Accept body titles only when they are textually anchored to the
-    cleaned topic subject.
-    """
     body = _clean(body_title)
     subject = _clean(subject_title)
     if not body or not subject:
@@ -654,9 +553,6 @@ def _body_title_related_to_subject(body_title: str, subject_title: str) -> bool:
     if not body_tokens or not subject_tokens:
         return False
     overlap = body_tokens & subject_tokens
-    # Require most body-title words to be explained by the subject and at
-    # least one meaningful shared token.  This accepts harmless punctuation
-    # / inflection differences but rejects an unrelated author-name heading.
     return bool(overlap) and (len(overlap) / len(body_tokens)) >= 0.67
 
 
@@ -671,18 +567,10 @@ def _alnum_compact(value: str) -> tuple[str, list[int]]:
 
 
 def _heal_subject_soft_breaks(subject_title: str, body_title: str) -> str:
-    """Use a related body heading only to heal spacing damage in the subject.
-
-    The body heading is *not* allowed to shorten a series title.  If its
-    alphanumeric text occurs inside the subject and the corresponding subject
-    span has more whitespace (typical ``wbr`` damage), replace only that span
-    with the body spelling while preserving all subject prefixes/suffixes.
-    """
     subject = _clean(subject_title)
     body = _clean(body_title)
     if not subject or not body:
         return subject
-
     body_key, _ = _alnum_compact(body)
     subject_key, subject_positions = _alnum_compact(subject)
     if len(body_key) < 4 or not subject_key:
@@ -690,28 +578,20 @@ def _heal_subject_soft_breaks(subject_title: str, body_title: str) -> str:
     offset = subject_key.find(body_key)
     if offset < 0:
         return subject
-
     first = subject_positions[offset]
     last = subject_positions[offset + len(body_key) - 1] + 1
     span = subject[first:last]
-    # Only use the body spelling to repair extra spaces introduced inside
-    # words.  Equal/fewer spaces means the subject is already structurally
-    # sound and remains authoritative.
     if span.count(" ") <= body.count(" "):
         return subject
     return _clean(subject[:first] + body + subject[last:])
 
 
 def _looks_like_person_prefix(value: str) -> bool:
-    """Conservative fallback for old topics that omit an explicit author field."""
     text = _clean(value)
     if not text or any(ch.isdigit() for ch in text):
         return False
     words = re.findall(r"[A-Za-zА-Яа-яЁё]+(?:-[A-Za-zА-Яа-яЁё]+)?\.?", text)
     if len(words) == 1:
-        # Pen names in the ranobe sections are sometimes a single Latin token
-        # (e.g. ``McEnroe``).  Accept them only in this narrow form; the caller
-        # still requires the body heading to confirm the right-hand title.
         bare = words[0].strip(".")
         return bool(re.fullmatch(r"[A-Za-z][A-Za-z'-]{2,39}", bare) and bare[:1].isupper())
     if not 2 <= len(words) <= 4:
@@ -719,8 +599,6 @@ def _looks_like_person_prefix(value: str) -> bool:
     noise = {"сборник", "сборники", "аудиокнига", "аудиокниги", "радиоспектакль", "радиоспектакли"}
     if any(word.casefold().strip(".") in noise for word in words):
         return False
-    # Person-name tokens are normally capitalized or initials.  Reject title
-    # phrases containing ordinary lowercase words.
     for word in words:
         bare = word.strip(".")
         if len(bare) == 1:
@@ -731,14 +609,6 @@ def _looks_like_person_prefix(value: str) -> bool:
 
 
 def _looks_like_strict_colon_person_prefix(value: str) -> bool:
-    """Narrow fallback for old ``ФИО: Название`` subjects.
-
-    Unlike the general person-prefix heuristic this form is accepted without
-    a confirming body heading only for two or three Cyrillic proper-name
-    tokens.  It intentionally rejects one-word work prefixes (``Дао: ...``),
-    lowercase noun phrases (``Красная площадь: ...``), long headings, Latin
-    slogans and anything containing digits.
-    """
     text = _clean(value)
     if not text or any(ch.isdigit() for ch in text):
         return False
@@ -750,23 +620,12 @@ def _looks_like_strict_colon_person_prefix(value: str) -> bool:
     for word in words:
         if len(word) < 2 or not word[:1].isupper():
             return False
-    # Reject an obvious adjective-led title phrase such as
-    # ``Великий Гэтсби: ...``.  This fallback is intentionally biased toward
-    # false negatives because ordinary colon titles must remain untouched.
     if re.search(r"(?:ый|ий|ая|яя|ое|ее|ые|ие)$", words[0].casefold()):
         return False
     return True
 
 
 def _infer_author_from_subject(raw_topic_title: str, body_title: str) -> str:
-    """Infer an author only when a clean body heading confirms the right side.
-
-    This is used solely for legacy topics without ``Автор``/``Фамилия автора``.
-    Requiring a person-looking prefix *and* a matching body title avoids
-    guessing on legitimate dashed work titles such as ``Москва - Петушки``.
-    A few older radio-play topics use ``ФИО: Название``; that colon form is
-    accepted only when the cleaned body heading matches the right side itself.
-    """
     raw_value = _clean(raw_topic_title)
     value, _ = _strip_release_suffix(raw_topic_title)
     sep_re = re.compile(r"(?:\s+[-–—]\s*|\s*[-–—]\s+)")
@@ -778,9 +637,6 @@ def _infer_author_from_subject(raw_topic_title: str, body_title: str) -> str:
         if _body_title_related_to_subject(body_title, right):
             return left
 
-    # Colon is common punctuation inside real titles, so be stricter than for
-    # dashes: require a person-looking prefix and an exact alphanumeric match
-    # between the cleaned body heading and the right-hand title.
     colon = re.match(r"^(.{2,100}?):\s+(.+)$", value)
     if colon:
         left = _clean(colon.group(1))
@@ -788,28 +644,16 @@ def _infer_author_from_subject(raw_topic_title: str, body_title: str) -> str:
         body_clean, _ = _strip_release_suffix(body_title)
         right_key, _ = _alnum_compact(right)
         body_key, _ = _alnum_compact(body_clean)
-        legacy_year_suffix = bool(
-            re.search(r"\((?:19|20)\d{2}\)\s*$", raw_value)
-        )
+        legacy_year_suffix = bool(re.search(r"\((?:19|20)\d{2}\)\s*$", raw_value))
         if (
-            left
-            and right
-            and _looks_like_person_prefix(left)
-            and right_key
-            and (
-                body_key == right_key
-                or legacy_year_suffix
-                or _looks_like_strict_colon_person_prefix(left)
-            )
+            left and right and _looks_like_person_prefix(left) and right_key
+            and (body_key == right_key or legacy_year_suffix or _looks_like_strict_colon_person_prefix(left))
         ):
             return left
     return ""
 
 
 def _select_topic_title(raw_topic_title: str, body_title: str, authors: list[str]) -> str:
-    # The RuTracker topic subject is the catalogue identity.  Keep it intact
-    # after removing author/release metadata; a body heading may be only a
-    # subtitle or one volume name and must never shorten the subject.
     subject = normalize_topic_subject_title(raw_topic_title, authors)
     body = normalize_topic_subject_title(body_title, authors) if body_title else ""
     if subject:
@@ -818,46 +662,30 @@ def _select_topic_title(raw_topic_title: str, body_title: str, authors: list[str
 
 
 def reconcile_repair_title(stored_title: str, parsed_title: str, authors: list[str]) -> str:
-    """Choose a conservative title when repairing an existing RuTracker row.
-
-    The repair may restore a fuller cleaned topic subject, but it must never
-    collapse an existing series/volume title down to a subtitle.
-    """
     stored = normalize_topic_subject_title(stored_title, authors)
     parsed = normalize_topic_subject_title(parsed_title, authors)
     if not stored:
         return parsed
     if not parsed:
         return stored
-
     stored_cf = stored.casefold()
     parsed_cf = parsed.casefold()
     if stored_cf == parsed_cf:
         return parsed
-
     stored_key, _ = _alnum_compact(stored)
     parsed_key, _ = _alnum_compact(parsed)
     if stored_key and stored_key == parsed_key:
         return parsed
-
-    # A remote full subject can restore a title that an older parser shortened.
     if stored_cf in parsed_cf:
         return parsed
-    # Never go the other way: a body subtitle must not erase series/volume info.
     if parsed_cf in stored_cf:
         return stored
-
-    if _body_title_related_to_subject(parsed, stored):
-        # For punctuation/spacing variants prefer the candidate carrying at
-        # least as much information as the stored title.
-        if len(parsed_key) >= len(stored_key):
-            return parsed
+    if _body_title_related_to_subject(parsed, stored) and len(parsed_key) >= len(stored_key):
+        return parsed
     return stored
 
 
 def _topic_display_title(post, raw_topic_title: str, authors: list[str] | None = None) -> str:
-    # In current audiobook releases the centered heading immediately preceding
-    # metadata is the clean work title (for example "Путь строителя").
     if post is not None:
         for node in post.select("span.post-align")[:3]:
             text = _node_text(node)
@@ -867,10 +695,6 @@ def _topic_display_title(post, raw_topic_title: str, authors: list[str] | None =
                 continue
             if len(text) <= 300:
                 return text
-
-        # Some RuTracker templates put the clean book title as plain text on
-        # the first line before ``Год выпуска`` instead of wrapping it in
-        # ``span.post-align``. Prefer that line to the release subject.
         for raw in post.get_text("\n", strip=True).splitlines()[:12]:
             text = _clean(raw).strip(":：")
             folded = text.casefold()
@@ -890,7 +714,8 @@ def _topic_authors(post, post_text: str) -> list[str]:
     surname = _post_field(post, ("Фамилия автора",)) or _label_value(post_text, ("Фамилия автора",))
     given = _post_field(post, ("Имя автора",)) or _label_value(post_text, ("Имя автора",))
     if surname or given:
-        return [_clean(f"{surname} {given}")]
+        value = _normalize_person_item(_clean(f"{surname} {given}"))
+        return [value] if value else []
     return []
 
 
@@ -921,7 +746,6 @@ def _series_heading_name(value: str) -> str:
     if not m:
         return ""
     name = _clean(m.group(1)).strip('«»"“” \t')
-    # A bare label such as ``Серия`` is not a series name.
     if not name or name.casefold() in {"серия", "цикл"}:
         return ""
     return name
@@ -930,8 +754,6 @@ def _series_heading_name(value: str) -> str:
 def _infer_topic_series_name(post) -> str:
     if post is None:
         return ""
-    # Strong source-side signals only: a dedicated series/cycle heading in a
-    # bold/link/spoiler header. This intentionally ignores prose mentions.
     for node in post.select("div.sp-head, a.postLink, span.post-b"):
         name = _series_heading_name(_node_text(node))
         if name:
@@ -941,8 +763,6 @@ def _infer_topic_series_name(post) -> str:
 
 def _series_title_key(value: str) -> str:
     text = _clean(value).casefold().replace("ё", "е")
-    # Normalize leading zeros in book numbers so ``Книга 01`` and ``Книга 1``
-    # match when linking text-only RuTracker series lists to imported books.
     text = re.sub(r"(?<!\d)0+(\d+)", lambda m: str(int(m.group(1))), text)
     return "".join(re.findall(r"[a-zа-я0-9]+", text, flags=re.I))
 
@@ -960,8 +780,6 @@ def _infer_series_position(title: str, body_title: str, series_name: str) -> int
         m = re.search(r"(?i)\b(?:книга|том|часть)\s*(?:№\s*)?0*(\d{1,3})\b", text)
         if m:
             return int(m.group(1))
-    # Legacy releases often use ``Series 4, Subtitle`` without a dedicated
-    # number field. Only trust a number immediately after the known series name.
     if series_name:
         for value in (title, body_title):
             text = _clean(value)
@@ -980,14 +798,8 @@ def _series_fragments(container) -> list[str]:
 
 
 def _parse_series_lines(
-    fragments: list[str],
-    *,
-    topic_url: str,
-    base_url: str,
-    series_name: str,
-    current_position: int | None,
-    current_title: str,
-    authors: list[str],
+    fragments: list[str], *, topic_url: str, base_url: str, series_name: str,
+    current_position: int | None, current_title: str, authors: list[str],
     require_heading: bool,
 ) -> list[ParsedSeriesEntry]:
     current_topic = _topic_id(topic_url)
@@ -996,9 +808,6 @@ def _parse_series_lines(
     seen_numbered = False
 
     for fragment in fragments:
-        # A numbered line can be immediately followed by a new block without
-        # another <br> (promo/footer/next spoiler). The list item itself uses
-        # inline markup, so truncate at the first block boundary.
         fragment = re.split(r"(?is)<(?:div|table|hr)\b", fragment, maxsplit=1)[0]
         frag = BeautifulSoup(fragment, "html.parser")
         text = _clean(frag.get_text(" ", strip=True))
@@ -1010,8 +819,6 @@ def _parse_series_lines(
             active = True
             continue
         if require_heading and not active:
-            # A heading can be nested inside the fragment rather than forming
-            # the entire line (as on the supplied ``Лекарь Империи`` page).
             for node in frag.select("a.postLink, span.post-b, div.sp-head"):
                 heading = _series_heading_name(_node_text(node))
                 if heading and heading.casefold() == series_name.casefold():
@@ -1019,16 +826,12 @@ def _parse_series_lines(
                     break
             if not active:
                 continue
-            # If this fragment only contains the heading, consume it.
             if not re.search(r"(?:^|\s)\d{1,3}[.)]\s*", text):
                 continue
 
         m = re.match(r"^(\d{1,3})[.)]\s*(.+)$", text)
         if not m:
             if active and seen_numbered:
-                # Numbered series lists are contiguous on RuTracker. Stop at
-                # the first unrelated line after the list to avoid parsing
-                # comments/technical blocks as bibliography entries.
                 break
             continue
 
@@ -1048,37 +851,25 @@ def _parse_series_lines(
         is_current = (
             "данный релиз" in text.casefold()
             or (current_position is not None and position == current_position)
-            or (
-                current_title
-                and _series_title_key(title) == _series_title_key(current_title)
-            )
+            or (current_title and _series_title_key(title) == _series_title_key(current_title))
         )
         if not external_id and is_current and current_topic:
             external_url = topic_url
             external_id = current_topic
         if not external_id:
-            # Text-only entries are still valuable: they preserve the source
-            # series order and can be resolved to a real BookSource later.
             external_id = _series_hint_id(series_name, position, title)
 
         entries.append(ParsedSeriesEntry(
-            external_id=external_id,
-            external_url=external_url,
-            title=title,
-            position=position,
-            authors=list(authors or []),
+            external_id=external_id, external_url=external_url, title=title,
+            position=position, authors=list(authors or []),
         ))
 
     return entries
 
 
 def _parse_topic_series(
-    post,
-    topic_url: str,
-    base_url: str,
-    series_name: str,
-    current_position: int | None,
-    current_title: str = "",
+    post, topic_url: str, base_url: str, series_name: str,
+    current_position: int | None, current_title: str = "",
     authors: list[str] | None = None,
 ) -> TopicSeries | None:
     if post is None or not series_name:
@@ -1086,7 +877,6 @@ def _parse_topic_series(
     current_topic = _topic_id(topic_url)
     all_entries: list[ParsedSeriesEntry] = []
 
-    # Classic RuTracker template: cycle list lives in a spoiler.
     for wrap in post.select("div.sp-wrap"):
         head = wrap.select_one("div.sp-head")
         body = wrap.select_one("div.sp-body")
@@ -1103,39 +893,24 @@ def _parse_topic_series(
         if heading_name and heading_name.casefold() != series_name.casefold():
             continue
         all_entries.extend(_parse_series_lines(
-            _series_fragments(body),
-            topic_url=topic_url,
-            base_url=base_url,
-            series_name=series_name,
-            current_position=current_position,
-            current_title=current_title,
-            authors=list(authors or []),
-            require_heading=False,
+            _series_fragments(body), topic_url=topic_url, base_url=base_url,
+            series_name=series_name, current_position=current_position,
+            current_title=current_title, authors=list(authors or []), require_heading=False,
         ))
 
-    # Newer/alternate template: a bold ``Серия «... »`` search link followed
-    # directly by a numbered plain-text list. This is the exact shape of the
-    # supplied ``Лекарь Империи`` page.
     all_entries.extend(_parse_series_lines(
-        _series_fragments(post),
-        topic_url=topic_url,
-        base_url=base_url,
-        series_name=series_name,
-        current_position=current_position,
-        current_title=current_title,
-        authors=list(authors or []),
-        require_heading=True,
+        _series_fragments(post), topic_url=topic_url, base_url=base_url,
+        series_name=series_name, current_position=current_position,
+        current_title=current_title, authors=list(authors or []), require_heading=True,
     ))
 
     if not all_entries:
         return None
 
-    # Deduplicate entries collected from nested spoiler + whole-post parsing.
     deduped: dict[tuple[int, str], ParsedSeriesEntry] = {}
     for entry in all_entries:
         key = (entry.position, _series_title_key(entry.title))
         existing = deduped.get(key)
-        # Prefer a real topic id over a synthetic text-only hint.
         if existing is None or (
             existing.external_id.startswith("series-hint:")
             and not entry.external_id.startswith("series-hint:")
@@ -1143,13 +918,11 @@ def _parse_topic_series(
             deduped[key] = entry
     entries = sorted(deduped.values(), key=lambda x: (x.position, x.title.casefold()))
 
-    # Anchor the cache to the page we actually know how to refetch. Services
-    # merge same-name RuTracker source-series rows, so importing book 2 before
-    # book 1 does not create duplicate cycles.
     external_id = f"topic-series:{current_topic}" if current_topic else ""
     if not external_id:
         return None
     return TopicSeries(external_id=external_id, name=series_name, entries=entries)
+
 
 def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
     soup = BeautifulSoup(html, "html.parser")
@@ -1182,10 +955,6 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
 
     authors = _topic_authors(post, post_text)
 
-    # Prefer a clean title from the body only when it is clearly related to
-    # the cleaned topic subject.  This preserves canonical subtitle-only names
-    # for series while rejecting unrelated first-line headings (for example an
-    # alternate author spelling).
     body_title = (
         _post_field(post, ("Название", "Наименование", "Название книги", "Название произведения"))
         or _label_value(post_text, ("Название", "Наименование", "Название книги", "Название произведения"))
@@ -1194,7 +963,9 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
     if not authors:
         inferred_author = _infer_author_from_subject(raw_topic_title, body_title)
         if inferred_author:
-            authors = [inferred_author]
+            # Important fix: inferred legacy subject can contain multiple people.
+            authors = _split_people(inferred_author)
+
     title = _select_topic_title(raw_topic_title, body_title, authors) or f"RuTracker {topic_id}"
     narrators = _split_people(
         _post_field(post, ("Исполнитель", "Читает", "Чтец"))
@@ -1205,16 +976,14 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
     series_genre_hint = ""
     genres: list[str] = []
     for value in raw_genres:
-        # Old topics sometimes put ``Серия: ...`` into the genre field. It is
-        # useful as a source-series hint but must never surface as a genre chip.
         m = re.match(r"(?i)^серия\s*[:：]\s*(.+)$", value)
         if m:
             series_genre_hint = series_genre_hint or _clean(m.group(1))
             continue
-        # ``аудиокнига`` is a carrier/category label, not a literary genre.
         if value.casefold() in {"аудиокнига", "audiobook"}:
             continue
         genres.append(value)
+
     description = _description_from_post(post) or _label_value(post_text, ("Описание",))
     if not description and post:
         description = _clean(post.get_text(" ", strip=True))[:5000]
@@ -1233,23 +1002,18 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
     )
     if series_name and (inferred_series_name or series_genre_hint):
         metadata_fields_present.add("series")
-    position_raw = (
-        _post_field(post, position_labels)
-        or _label_value(post_text, position_labels)
-    )
+    position_raw = _post_field(post, position_labels) or _label_value(post_text, position_labels)
     series_position = _int(position_raw) or _infer_series_position(title, body_title, series_name)
     topic_series = _parse_topic_series(
-        post,
-        topic_url,
-        base_url,
-        series_name,
-        series_position,
-        current_title=title,
-        authors=authors,
+        post, topic_url, base_url, series_name, series_position,
+        current_title=title, authors=authors,
     )
 
     magnet = ""
-    magnet_link = soup.select_one('table.attach a.magnet-link[href^="magnet:?"], a.magnet-link[href^="magnet:?"], a[href^="magnet:?"]')
+    magnet_link = soup.select_one(
+        'table.attach a.magnet-link[href^="magnet:?"], '
+        'a.magnet-link[href^="magnet:?"], a[href^="magnet:?"]'
+    )
     if magnet_link:
         magnet = magnet_link.get("href", "")
 
@@ -1276,7 +1040,11 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
         series_external_id=topic_series.external_id if topic_series else "",
         series_position=series_position,
         series_entries=list(topic_series.entries) if topic_series else [],
-        torrent=ParsedTorrent(info_hash=_info_hash_from_magnet(magnet), magnet_uri=magnet, torrent_url=torrent_url),
+        torrent=ParsedTorrent(
+            info_hash=_info_hash_from_magnet(magnet),
+            magnet_uri=magnet,
+            torrent_url=torrent_url,
+        ),
     )
 
 
@@ -1361,21 +1129,23 @@ def parse_torrent_bytes(data: bytes, *, magnet_uri: str = "", torrent_url: str =
             path = "/".join(_decode_path_part(x) for x in parts if isinstance(x, bytes))
             size = int(item.get(b"length") or 0)
             ext = PurePosixPath(path).suffix.casefold()
-            files.append(ParsedTorrentFile(index=index, path=path, size_bytes=size, media_type="audio" if ext in _AUDIO_EXTS else "other"))
+            files.append(ParsedTorrentFile(
+                index=index, path=path, size_bytes=size,
+                media_type="audio" if ext in _AUDIO_EXTS else "other",
+            ))
     else:
         name = info.get(b"name.utf-8") or info.get(b"name") or b"audio"
         path = _decode_path_part(name) if isinstance(name, bytes) else str(name)
         size = int(info.get(b"length") or 0)
         ext = PurePosixPath(path).suffix.casefold()
-        files.append(ParsedTorrentFile(index=0, path=path, size_bytes=size, media_type="audio" if ext in _AUDIO_EXTS else "other"))
+        files.append(ParsedTorrentFile(
+            index=0, path=path, size_bytes=size,
+            media_type="audio" if ext in _AUDIO_EXTS else "other",
+        ))
 
-    total = sum(x.size_bytes for x in files)
     return ParsedTorrent(
-        info_hash=info_hash,
-        magnet_uri=magnet_uri,
-        torrent_url=torrent_url,
-        total_size_bytes=total,
-        files=files,
+        info_hash=info_hash, magnet_uri=magnet_uri, torrent_url=torrent_url,
+        total_size_bytes=sum(x.size_bytes for x in files), files=files,
     )
 
 
@@ -1390,15 +1160,6 @@ def _natural_key(value: str):
 
 
 def _estimated_chapter_durations(total_seconds: int, audio_files: list[ParsedTorrentFile]) -> list[int]:
-    """Distribute a source-reported total duration across torrent audio files.
-
-    RuTracker topic pages commonly expose an accurate total playing time while
-    torrent metadata exposes file sizes but no media durations. Audiobook
-    releases normally use one codec/bitrate across chapters, so byte-weighted
-    allocation is a much better server-side estimate than all-zero durations.
-    The final chapter absorbs rounding so the estimates sum exactly to the
-    source-reported total.
-    """
     total_seconds = max(0, int(total_seconds or 0))
     if total_seconds <= 0 or not audio_files:
         return [0 for _ in audio_files]
@@ -1423,10 +1184,7 @@ def _estimated_chapter_durations(total_seconds: int, audio_files: list[ParsedTor
     return out
 
 
-
-
 def detect_last_forum_page(html: str, *, forum_id: int, page_size: int = 50) -> int:
-    """Best-effort last-page detection from RuTracker viewforum pagination."""
     soup = BeautifulSoup(html, "html.parser")
     last_page = 1
     page_size = max(1, int(page_size))
@@ -1478,19 +1236,11 @@ def hydrate_book_from_torrent(book: ParsedBook, torrent: ParsedTorrent) -> Parse
 
 
 class RuTrackerWorkerClient:
-    """HTTP adapter that sends every RuTracker request through a Cloudflare Worker."""
-
     def __init__(
-        self,
-        *,
-        worker_url: str,
-        worker_token: str,
-        worker_token_header: str = "X-Proxy-Token",
-        worker_mode: str = "mirror",
-        base_url: str = "https://rutracker.org",
-        delay_seconds: float = 0.15,
-        timeout_seconds: float = 30.0,
-        page_size: int = 50,
+        self, *, worker_url: str, worker_token: str,
+        worker_token_header: str = "X-Proxy-Token", worker_mode: str = "mirror",
+        base_url: str = "https://rutracker.org", delay_seconds: float = 0.15,
+        timeout_seconds: float = 30.0, page_size: int = 50,
     ):
         self.worker_url = worker_url.rstrip("/")
         self.worker_token = worker_token
@@ -1523,13 +1273,7 @@ class RuTrackerWorkerClient:
             suffix += "?" + parsed.query
         return self.worker_url + suffix
 
-    async def _request(
-        self,
-        target_url: str,
-        *,
-        accept: str,
-        referer: str = "",
-    ) -> httpx.Response:
+    async def _request(self, target_url: str, *, accept: str, referer: str = "") -> httpx.Response:
         if not self.worker_url:
             raise RuntimeError("RUTRACKER_WORKER_URL is required")
         if not self.worker_token:
@@ -1552,15 +1296,14 @@ class RuTrackerWorkerClient:
 
     async def get_torrent(self, target_url: str, *, referer: str = "") -> bytes:
         response = await self._request(
-            target_url,
-            accept="application/x-bittorrent,*/*;q=0.8",
-            referer=referer,
+            target_url, accept="application/x-bittorrent,*/*;q=0.8", referer=referer,
         )
         data = response.content
         if not data.startswith(b"d"):
             content_type = response.headers.get("content-type", "")
             raise RuntimeError(
-                f"worker did not return bencoded torrent (content-type={content_type or 'unknown'}, bytes={len(data)})"
+                f"worker did not return bencoded torrent "
+                f"(content-type={content_type or 'unknown'}, bytes={len(data)})"
             )
         return data
 
