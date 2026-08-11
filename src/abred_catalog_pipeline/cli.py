@@ -14,6 +14,7 @@ from .cursor import CrawlCursor, plan_pages
 from .feed import write_feed_bundle
 from .rutracker.crawler import RuTrackerState, crawl_once as crawl_rutracker_once, parse_forum_ids
 from .rutracker.parser import RuTrackerWorkerClient
+from .rutracker.torrserver import TorrServerClient
 
 
 def _run_id() -> str:
@@ -59,6 +60,11 @@ async def _run_audiopolka(args: argparse.Namespace) -> int:
 
 
 async def _run_rutracker(args: argparse.Namespace) -> int:
+    if args.torrserver_enrich and args.download_torrents:
+        raise SystemExit("--torrserver-enrich and --download-torrents are mutually exclusive")
+    if args.torrserver_enrich and not (args.torrserver_url or "").strip():
+        raise SystemExit("--torrserver-enrich requires --torrserver-url or TORRSERVER_URL")
+
     cursor_path = Path(args.state)
     cursor = RuTrackerState.load(cursor_path)
     parser = RuTrackerWorkerClient(
@@ -70,6 +76,15 @@ async def _run_rutracker(args: argparse.Namespace) -> int:
         delay_seconds=args.delay,
         page_size=args.page_size,
     )
+    torrserver = None
+    if args.torrserver_enrich:
+        torrserver = TorrServerClient(
+            base_url=args.torrserver_url,
+            username=args.torrserver_username,
+            password=args.torrserver_password,
+            timeout_seconds=args.torrserver_timeout,
+            poll_interval_seconds=args.torrserver_poll_interval,
+        )
     try:
         result, next_cursor = await crawl_rutracker_once(
             parser,
@@ -78,10 +93,14 @@ async def _run_rutracker(args: argparse.Namespace) -> int:
             backfill_pages=args.backfill_pages,
             max_topics=max(0, int(args.max_topics or 0)),
             download_torrents=bool(args.download_torrents),
+            torrserver=torrserver,
+            torrserver_max_new=max(0, int(args.torrserver_max_new or 0)),
             advance_cursor=bool(args.advance_cursor),
         )
     finally:
         await parser.aclose()
+        if torrserver is not None:
+            await torrserver.aclose()
 
     run_id = args.run_id or _run_id()
     bundle_dir = Path(args.out) / run_id
@@ -108,6 +127,7 @@ async def _run_rutracker(args: argparse.Namespace) -> int:
         "topics_seen": result["topics_seen"],
         "truncated": result["truncated"],
         "cursor_advanced": bool(args.advance_cursor and not result["truncated"]),
+        "torrent_metadata": result["torrent_metadata"],
         "cursor": result["cursor_after"],
         "feed": bundle["feed_path"],
         "manifest": bundle["manifest_path"],
@@ -172,6 +192,30 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     rt.set_defaults(download_torrents=False)
+    rt.add_argument(
+        "--torrserver-enrich",
+        action="store_true",
+        help="enrich new RuTracker info hashes through TorrServer using magnet metadata",
+    )
+    rt.add_argument("--torrserver-url", default=os.environ.get("TORRSERVER_URL", ""))
+    rt.add_argument("--torrserver-username", default=os.environ.get("TORRSERVER_USERNAME", ""))
+    rt.add_argument("--torrserver-password", default=os.environ.get("TORRSERVER_PASSWORD", ""))
+    rt.add_argument(
+        "--torrserver-timeout",
+        type=float,
+        default=float(os.environ.get("TORRSERVER_TIMEOUT_SECONDS", "45") or 45),
+    )
+    rt.add_argument(
+        "--torrserver-poll-interval",
+        type=float,
+        default=float(os.environ.get("TORRSERVER_POLL_INTERVAL_SECONDS", "1") or 1),
+    )
+    rt.add_argument(
+        "--torrserver-max-new",
+        type=int,
+        default=int(os.environ.get("TORRSERVER_MAX_NEW", "0") or 0),
+        help="maximum previously unseen info hashes to enrich in one run; 0 = unlimited",
+    )
     rt.add_argument("--advance-cursor", action="store_true")
     rt.add_argument("--delay", type=float, default=0.15)
     rt.add_argument("--run-id", default="")

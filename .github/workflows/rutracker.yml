@@ -19,12 +19,22 @@ on:
         default: true
         type: boolean
       download_torrents:
-        description: "Optional enrichment: fetch .torrent metainfo through the Worker"
+        description: "Legacy enrichment: fetch .torrent metainfo through the Worker"
         required: false
         default: false
         type: boolean
+      torrserver_enrich:
+        description: "Enrich unseen magnet/info_hash records through TorrServer"
+        required: false
+        default: true
+        type: boolean
+      torrserver_max_new:
+        description: "Max unseen hashes to ask TorrServer for in this run; 0 = unlimited"
+        required: false
+        default: "300"
+        type: string
   schedule:
-    # Every 6 hours at :47 UTC, staggered 30 minutes after Audiopolka.
+    # Every 2 hours at :47 UTC, staggered after Audiopolka.
     - cron: "47 */2 * * *"
 
 permissions:
@@ -39,6 +49,12 @@ env:
   RUTRACKER_WORKER_TOKEN: ${{ secrets.RUTRACKER_WORKER_TOKEN }}
   RUTRACKER_WORKER_TOKEN_HEADER: ${{ vars.RUTRACKER_WORKER_TOKEN_HEADER || 'X-Proxy-Token' }}
   RUTRACKER_WORKER_MODE: ${{ vars.RUTRACKER_WORKER_MODE || 'mirror' }}
+  TORRSERVER_URL: ${{ vars.TORRSERVER_URL }}
+  TORRSERVER_USERNAME: ${{ secrets.TORRSERVER_USERNAME }}
+  TORRSERVER_PASSWORD: ${{ secrets.TORRSERVER_PASSWORD }}
+  TORRSERVER_MAX_NEW: ${{ vars.TORRSERVER_MAX_NEW || '300' }}
+  TORRSERVER_TIMEOUT_SECONDS: ${{ vars.TORRSERVER_TIMEOUT_SECONDS || '45' }}
+  TORRSERVER_POLL_INTERVAL_SECONDS: ${{ vars.TORRSERVER_POLL_INTERVAL_SECONDS || '1' }}
 
 jobs:
   crawl:
@@ -58,7 +74,7 @@ jobs:
       - name: Tests
         run: pytest -q
 
-      - name: Validate Worker configuration
+      - name: Validate Worker and TorrServer configuration
         shell: bash
         run: |
           test -n "$RUTRACKER_WORKER_URL" || { echo "Missing Actions variable RUTRACKER_WORKER_URL"; exit 1; }
@@ -66,6 +82,19 @@ jobs:
           echo "Worker URL configured: $RUTRACKER_WORKER_URL"
           echo "Worker mode: $RUTRACKER_WORKER_MODE"
           echo "Worker token header: $RUTRACKER_WORKER_TOKEN_HEADER"
+
+          use_torrserver=false
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            use_torrserver=true
+          elif [[ "${{ inputs.torrserver_enrich }}" == "true" ]]; then
+            use_torrserver=true
+          fi
+
+          if [[ "$use_torrserver" == "true" ]]; then
+            test -n "$TORRSERVER_URL" || { echo "Missing Actions variable TORRSERVER_URL"; exit 1; }
+            echo "TorrServer URL configured"
+            echo "TorrServer max new hashes: $TORRSERVER_MAX_NEW"
+          fi
 
       - name: Crawl RuTracker through Worker
         shell: bash
@@ -81,30 +110,41 @@ jobs:
               args+=(--forums "${{ inputs.forums }}")
             fi
             args+=(--max-topics "${{ inputs.max_topics }}")
+
             if [[ "${{ inputs.advance_cursor }}" == "true" ]]; then
               args+=(--advance-cursor)
             fi
+
+            if [[ "${{ inputs.download_torrents }}" == "true" && "${{ inputs.torrserver_enrich }}" == "true" ]]; then
+              echo "Choose only one enrichment mode: download_torrents OR torrserver_enrich"
+              exit 1
+            fi
+
             if [[ "${{ inputs.download_torrents }}" == "true" ]]; then
               args+=(--download-torrents)
             fi
+
+            if [[ "${{ inputs.torrserver_enrich }}" == "true" ]]; then
+              args+=(--torrserver-enrich --torrserver-max-new "${{ inputs.torrserver_max_new }}")
+            fi
           else
-            args+=(--advance-cursor)
+            args+=(--advance-cursor --torrserver-enrich --torrserver-max-new "$TORRSERVER_MAX_NEW")
           fi
 
           python -m abred_catalog_pipeline "${args[@]}" | tee crawl-result.json
 
-      - name: Persist cursor
+      - name: Persist cursor and TorrServer metadata cache
         if: github.event_name == 'schedule' || inputs.advance_cursor == true
         shell: bash
         run: |
           if git diff --quiet -- state/rutracker.json; then
-            echo "Cursor unchanged"
+            echo "Cursor/cache unchanged"
             exit 0
           fi
           git config user.name "abred-catalog-bot"
           git config user.email "abred-catalog-bot@users.noreply.github.com"
           git add state/rutracker.json
-          git commit -m "catalog: advance RuTracker cursor"
+          git commit -m "catalog: advance RuTracker cursor/metadata cache"
           git push
 
       - name: Upload feed artifact

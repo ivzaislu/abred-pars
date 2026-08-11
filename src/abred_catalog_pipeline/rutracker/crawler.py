@@ -15,6 +15,7 @@ from .parser import (
     parse_topic_html,
     parse_torrent_bytes,
 )
+from .torrserver import TorrServerClient
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,10 @@ class ForumCursor:
 class RuTrackerState:
     source: str = "rutracker"
     forums: dict[str, ForumCursor] = field(default_factory=dict)
+    # Successful TorrServer metadata hashes. A known hash may be emitted as
+    # magnet-only on later crawls because the backend already received the
+    # complete files/chapters on the first successful enriched feed.
+    torrent_metadata_hashes: set[str] = field(default_factory=set)
 
     @classmethod
     def load(cls, path: str | Path) -> "RuTrackerState":
@@ -43,9 +48,16 @@ class RuTrackerState:
                 last_page=_positive_or_none(value.get("last_page")),
                 backfill_complete=bool(value.get("backfill_complete", False)),
             )
-        return cls(source="rutracker", forums=forums)
+        hashes = {
+            str(value).strip().lower()
+            for value in (raw.get("torrent_metadata_hashes") or [])
+            if isinstance(value, str) and len(value.strip()) == 40
+        }
+        return cls(source="rutracker", forums=forums, torrent_metadata_hashes=hashes)
 
     def as_dict(self) -> dict:
+        # Feed cursor metadata stays compact and backward-compatible. The
+        # TorrServer hash cache is persisted only in the state file below.
         return {
             "source": "rutracker",
             "forums": {
@@ -54,11 +66,16 @@ class RuTrackerState:
             },
         }
 
+    def storage_dict(self) -> dict:
+        out = self.as_dict()
+        out["torrent_metadata_hashes"] = sorted(self.torrent_metadata_hashes)
+        return out
+
     def save(self, path: str | Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(self.as_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(self.storage_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         tmp.replace(path)
 
 
@@ -92,15 +109,29 @@ async def crawl_once(
     backfill_pages: int = 1,
     max_topics: int = 0,
     download_torrents: bool = False,
+    torrserver: TorrServerClient | None = None,
+    torrserver_max_new: int = 0,
     advance_cursor: bool = True,
 ) -> tuple[dict, RuTrackerState]:
+    if download_torrents and torrserver is not None:
+        raise ValueError("download_torrents and torrserver enrichment are mutually exclusive")
+
     records: list[dict] = []
     rejected: list[dict] = []
     tombstones: list[dict] = []
     seen_topics: set[str] = set()
     page_trace: list[dict] = []
     next_forums = dict(state.forums)
+    next_metadata_hashes = set(state.torrent_metadata_hashes)
     truncated = False
+    torrserver_max_new = max(0, int(torrserver_max_new or 0))
+    metadata_stats = {
+        "attempted": 0,
+        "enriched": 0,
+        "known": 0,
+        "deferred": 0,
+        "failed": 0,
+    }
 
     for forum_id in forum_ids:
         forum_key = str(forum_id)
@@ -146,7 +177,45 @@ async def crawl_once(
 
                     torrent_status = "magnet"
                     torrent_error = ""
-                    if download_torrents:
+                    metadata_attempted = False
+                    info_hash = (torrent_ref.info_hash or "").strip().lower()
+
+                    if torrserver is not None and info_hash:
+                        if info_hash in next_metadata_hashes:
+                            book.torrent = torrent_ref
+                            torrent_status = "torrent_metadata_known"
+                            metadata_stats["known"] += 1
+                        elif torrserver_max_new and metadata_stats["attempted"] >= torrserver_max_new:
+                            book.torrent = torrent_ref
+                            torrent_status = "magnet_deferred"
+                            metadata_stats["deferred"] += 1
+                        else:
+                            metadata_attempted = True
+                            metadata_stats["attempted"] += 1
+                            try:
+                                torrent = await torrserver.ensure_metadata(
+                                    info_hash,
+                                    torrent_ref.magnet_uri,
+                                )
+                                torrent.torrent_url = row.torrent_url or parser.torrent_url(row.topic_id)
+                                torrent.seeders = row.seeders
+                                torrent.leechers = row.leechers
+                                if torrent_ref.info_hash and torrent.info_hash != info_hash:
+                                    raise RuntimeError(
+                                        f"magnet/TorrServer info_hash mismatch: "
+                                        f"{torrent_ref.info_hash} != {torrent.info_hash}"
+                                    )
+                                book = hydrate_book_from_torrent(book, torrent)
+                                next_metadata_hashes.add(info_hash)
+                                torrent_status = "torrent_metainfo"
+                                metadata_stats["enriched"] += 1
+                            except Exception as exc:
+                                book.torrent = torrent_ref
+                                torrent_status = "magnet_fallback"
+                                torrent_error = str(exc)[:500]
+                                metadata_stats["failed"] += 1
+                    elif download_torrents:
+                        metadata_attempted = True
                         try:
                             raw_torrent = await parser.get_torrent(
                                 row.torrent_url or parser.torrent_url(row.topic_id),
@@ -186,7 +255,7 @@ async def crawl_once(
                         "leechers": row.leechers,
                         "listed_size_bytes": row.size_bytes,
                         "torrent_metadata_status": torrent_status,
-                        "torrent_metadata_attempted": bool(download_torrents),
+                        "torrent_metadata_attempted": metadata_attempted,
                         "torrent_metadata_error": torrent_error or None,
                     }
                     if book.series_entries and record.get("series"):
@@ -215,8 +284,12 @@ async def crawl_once(
 
     if truncated or not advance_cursor:
         next_forums = dict(state.forums)
+        next_metadata_hashes = set(state.torrent_metadata_hashes)
 
-    next_state = RuTrackerState(forums=next_forums)
+    next_state = RuTrackerState(
+        forums=next_forums,
+        torrent_metadata_hashes=next_metadata_hashes,
+    )
     return {
         "pages": page_trace,
         "records": records,
@@ -226,4 +299,5 @@ async def crawl_once(
         "cursor_after": next_state.as_dict(),
         "truncated": truncated,
         "topics_seen": len(seen_topics),
+        "torrent_metadata": metadata_stats,
     }, next_state
