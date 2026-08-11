@@ -1,0 +1,63 @@
+name: Audit RuTracker artifact titles
+
+on:
+  push:
+    branches:
+      - assistant/artifact-title-audit
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -L \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/9120775796/zip" \
+            -o artifact.zip
+          unzip -q artifact.zip -d artifact
+
+      - name: Audit titles
+        run: |
+          python - <<'PY'
+          import json, pathlib, re
+
+          root = pathlib.Path('artifact')
+          feed = next(root.rglob('feed.json'))
+          data = json.loads(feed.read_text(encoding='utf-8'))
+          records = data.get('records', [])
+
+          patterns = [
+              ('codec', re.compile(r'\b(?:mp3|m4b|m4a|aac|ogg|opus|flac|wav|wma)\b', re.I)),
+              ('bitrate', re.compile(r'\b\d{2,4}\s*(?:kbps|kbit/s|kb/s|кбит/с|кб/с|кбит)\b', re.I)),
+              ('sample_rate', re.compile(r'\b\d{2,3}(?:[.,]\d+)?\s*(?:khz|кгц)\b', re.I)),
+              ('channels', re.compile(r'\b(?:mono|stereo|моно|стерео|cbr|vbr)\b', re.I)),
+              ('release_brackets', re.compile(r'\[[^\]]*(?:19|20)\d{2}[^\]]*\]')),
+              ('year_meta_tail', re.compile(r'(?:[-–—,]\s*)?(?:19|20)\d{2}\s*(?:г\.?\s*)?(?:[,;].*)?$', re.I)),
+          ]
+
+          flagged = []
+          for r in records:
+              title = (r.get('title') or '').strip()
+              flags = [name for name, rx in patterns if rx.search(title)]
+              if '[' in title or ']' in title:
+                  flags.append('brackets')
+              if flags:
+                  flagged.append((str(r.get('external_id') or ''), title, sorted(set(flags))))
+
+          print(f'RECORDS={len(records)}')
+          print(f'FLAGGED={len(flagged)}')
+          print('===FLAGGED_START===')
+          for external_id, title, flags in flagged:
+              url = f'https://rutracker.org/forum/viewtopic.php?t={external_id}'
+              print(json.dumps({'id': external_id, 'title': title, 'flags': flags, 'url': url}, ensure_ascii=False))
+          print('===FLAGGED_END===')
+          PY
