@@ -95,6 +95,7 @@ async def _run_rutracker(args: argparse.Namespace) -> int:
             download_torrents=bool(args.download_torrents),
             torrserver=torrserver,
             torrserver_max_new=max(0, int(args.torrserver_max_new or 0)),
+            torrserver_replay_successes=max(1, int(args.torrserver_replay_successes or 1)),
             advance_cursor=bool(args.advance_cursor),
         )
     finally:
@@ -126,7 +127,8 @@ async def _run_rutracker(args: argparse.Namespace) -> int:
         "rejected": len(result["rejected"]),
         "topics_seen": result["topics_seen"],
         "truncated": result["truncated"],
-        "cursor_advanced": bool(args.advance_cursor and not result["truncated"]),
+        "cursor_held_for_metadata": result["cursor_held_for_metadata"],
+        "cursor_advanced": result["cursor_advanced"],
         "torrent_metadata": result["torrent_metadata"],
         "cursor": result["cursor_after"],
         "feed": bundle["feed_path"],
@@ -203,7 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
     rt.add_argument(
         "--torrserver-timeout",
         type=float,
-        default=float(os.environ.get("TORRSERVER_TIMEOUT_SECONDS", "45") or 45),
+        default=float(os.environ.get("TORRSERVER_TIMEOUT_SECONDS", "30") or 30),
     )
     rt.add_argument(
         "--torrserver-poll-interval",
@@ -214,7 +216,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--torrserver-max-new",
         type=int,
         default=int(os.environ.get("TORRSERVER_MAX_NEW", "0") or 0),
-        help="maximum previously unseen info hashes to enrich in one run; 0 = unlimited",
+        help="maximum unconfirmed hashes to ask TorrServer for in one run; 0 = unlimited",
+    )
+    rt.add_argument(
+        "--torrserver-replay-successes",
+        type=int,
+        default=int(os.environ.get("TORRSERVER_REPLAY_SUCCESSES", "2") or 2),
+        help="successful enriched deliveries required before a hash becomes metadata-known",
     )
     rt.add_argument("--advance-cursor", action="store_true")
     rt.add_argument("--delay", type=float, default=0.15)

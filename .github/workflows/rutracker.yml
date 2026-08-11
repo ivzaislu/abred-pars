@@ -14,7 +14,7 @@ on:
         default: "0"
         type: string
       advance_cursor:
-        description: "Persist RuTracker cursor after a complete non-truncated run"
+        description: "Persist RuTracker cursor/metadata state after a complete non-truncated run"
         required: false
         default: true
         type: boolean
@@ -24,14 +24,14 @@ on:
         default: false
         type: boolean
       torrserver_enrich:
-        description: "Enrich unseen magnet/info_hash records through TorrServer"
+        description: "Enrich unconfirmed magnet/info_hash records through TorrServer"
         required: false
         default: true
         type: boolean
       torrserver_max_new:
-        description: "Max unseen hashes to ask TorrServer for in this run; 0 = unlimited"
+        description: "Max unconfirmed hashes to ask TorrServer for in this run; 0 = unlimited"
         required: false
-        default: "300"
+        default: "100"
         type: string
   schedule:
     # Every 2 hours at :47 UTC, staggered after Audiopolka.
@@ -52,9 +52,10 @@ env:
   TORRSERVER_URL: ${{ vars.TORRSERVER_URL }}
   TORRSERVER_USERNAME: ${{ secrets.TORRSERVER_USERNAME }}
   TORRSERVER_PASSWORD: ${{ secrets.TORRSERVER_PASSWORD }}
-  TORRSERVER_MAX_NEW: ${{ vars.TORRSERVER_MAX_NEW || '300' }}
-  TORRSERVER_TIMEOUT_SECONDS: ${{ vars.TORRSERVER_TIMEOUT_SECONDS || '45' }}
+  TORRSERVER_MAX_NEW: ${{ vars.TORRSERVER_MAX_NEW || '100' }}
+  TORRSERVER_TIMEOUT_SECONDS: ${{ vars.TORRSERVER_TIMEOUT_SECONDS || '30' }}
   TORRSERVER_POLL_INTERVAL_SECONDS: ${{ vars.TORRSERVER_POLL_INTERVAL_SECONDS || '1' }}
+  TORRSERVER_REPLAY_SUCCESSES: ${{ vars.TORRSERVER_REPLAY_SUCCESSES || '2' }}
 
 jobs:
   crawl:
@@ -93,7 +94,9 @@ jobs:
           if [[ "$use_torrserver" == "true" ]]; then
             test -n "$TORRSERVER_URL" || { echo "Missing Actions variable TORRSERVER_URL"; exit 1; }
             echo "TorrServer URL configured"
-            echo "TorrServer max new hashes: $TORRSERVER_MAX_NEW"
+            echo "TorrServer max requests: $TORRSERVER_MAX_NEW"
+            echo "TorrServer timeout: ${TORRSERVER_TIMEOUT_SECONDS}s"
+            echo "TorrServer replay successes: $TORRSERVER_REPLAY_SUCCESSES"
           fi
 
       - name: Crawl RuTracker through Worker
@@ -125,28 +128,25 @@ jobs:
             fi
 
             if [[ "${{ inputs.torrserver_enrich }}" == "true" ]]; then
-              args+=(--torrserver-enrich --torrserver-max-new "${{ inputs.torrserver_max_new }}")
+              args+=(
+                --torrserver-enrich
+                --torrserver-max-new "${{ inputs.torrserver_max_new }}"
+                --torrserver-replay-successes "$TORRSERVER_REPLAY_SUCCESSES"
+              )
             fi
           else
-            args+=(--advance-cursor --torrserver-enrich --torrserver-max-new "$TORRSERVER_MAX_NEW")
+            args+=(
+              --advance-cursor
+              --torrserver-enrich
+              --torrserver-max-new "$TORRSERVER_MAX_NEW"
+              --torrserver-replay-successes "$TORRSERVER_REPLAY_SUCCESSES"
+            )
           fi
 
           python -m abred_catalog_pipeline "${args[@]}" | tee crawl-result.json
 
-      - name: Persist cursor and TorrServer metadata cache
-        if: github.event_name == 'schedule' || inputs.advance_cursor == true
-        shell: bash
-        run: |
-          if git diff --quiet -- state/rutracker.json; then
-            echo "Cursor/cache unchanged"
-            exit 0
-          fi
-          git config user.name "abred-catalog-bot"
-          git config user.email "abred-catalog-bot@users.noreply.github.com"
-          git add state/rutracker.json
-          git commit -m "catalog: advance RuTracker cursor/metadata cache"
-          git push
-
+      # Artifact must exist before cursor/cache state is committed. If upload
+      # fails, the next run will safely repeat the same cursor/metadata work.
       - name: Upload feed artifact
         uses: actions/upload-artifact@v4
         with:
@@ -157,3 +157,17 @@ jobs:
             crawl-result.json
           if-no-files-found: error
           retention-days: 14
+
+      - name: Persist cursor and TorrServer metadata state
+        if: github.event_name == 'schedule' || inputs.advance_cursor == true
+        shell: bash
+        run: |
+          if git diff --quiet -- state/rutracker.json; then
+            echo "Cursor/metadata state unchanged"
+            exit 0
+          fi
+          git config user.name "abred-catalog-bot"
+          git config user.email "abred-catalog-bot@users.noreply.github.com"
+          git add state/rutracker.json
+          git commit -m "catalog: persist RuTracker cursor/metadata state"
+          git push

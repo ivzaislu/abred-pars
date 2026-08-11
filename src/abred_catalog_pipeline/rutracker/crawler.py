@@ -25,14 +25,28 @@ class ForumCursor:
     backfill_complete: bool = False
 
 
+def _hash40(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if len(text) != 40:
+        return ""
+    try:
+        int(text, 16)
+    except ValueError:
+        return ""
+    return text
+
+
 @dataclass(slots=True)
 class RuTrackerState:
     source: str = "rutracker"
     forums: dict[str, ForumCursor] = field(default_factory=dict)
-    # Successful TorrServer metadata hashes. A known hash may be emitted as
-    # magnet-only on later crawls because the backend already received the
-    # complete files/chapters on the first successful enriched feed.
+    # Hashes with enough successful enriched-feed deliveries to stop asking
+    # TorrServer on normal future crawls.
     torrent_metadata_hashes: set[str] = field(default_factory=set)
+    # Successful enriched deliveries that still need one or more replay passes.
+    # The replay makes a deep-page metadata result appear in more than one
+    # artifact before its cursor is allowed to move on.
+    torrent_metadata_pending: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: str | Path) -> "RuTrackerState":
@@ -49,15 +63,31 @@ class RuTrackerState:
                 backfill_complete=bool(value.get("backfill_complete", False)),
             )
         hashes = {
-            str(value).strip().lower()
+            parsed
             for value in (raw.get("torrent_metadata_hashes") or [])
-            if isinstance(value, str) and len(value.strip()) == 40
+            if (parsed := _hash40(value))
         }
-        return cls(source="rutracker", forums=forums, torrent_metadata_hashes=hashes)
+        pending: dict[str, int] = {}
+        for key, value in (raw.get("torrent_metadata_pending") or {}).items():
+            parsed = _hash40(key)
+            if not parsed or parsed in hashes:
+                continue
+            try:
+                count = max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+            if count:
+                pending[parsed] = count
+        return cls(
+            source="rutracker",
+            forums=forums,
+            torrent_metadata_hashes=hashes,
+            torrent_metadata_pending=pending,
+        )
 
     def as_dict(self) -> dict:
-        # Feed cursor metadata stays compact and backward-compatible. The
-        # TorrServer hash cache is persisted only in the state file below.
+        # Feed cursor metadata stays compact and backward-compatible. TorrServer
+        # delivery/cache state is persisted only in the state file below.
         return {
             "source": "rutracker",
             "forums": {
@@ -69,13 +99,21 @@ class RuTrackerState:
     def storage_dict(self) -> dict:
         out = self.as_dict()
         out["torrent_metadata_hashes"] = sorted(self.torrent_metadata_hashes)
+        out["torrent_metadata_pending"] = {
+            key: int(value)
+            for key, value in sorted(self.torrent_metadata_pending.items())
+            if key not in self.torrent_metadata_hashes and int(value) > 0
+        }
         return out
 
     def save(self, path: str | Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(self.storage_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(
+            json.dumps(self.storage_dict(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
         tmp.replace(path)
 
 
@@ -111,6 +149,7 @@ async def crawl_once(
     download_torrents: bool = False,
     torrserver: TorrServerClient | None = None,
     torrserver_max_new: int = 0,
+    torrserver_replay_successes: int = 2,
     advance_cursor: bool = True,
 ) -> tuple[dict, RuTrackerState]:
     if download_torrents and torrserver is not None:
@@ -123,11 +162,16 @@ async def crawl_once(
     page_trace: list[dict] = []
     next_forums = dict(state.forums)
     next_metadata_hashes = set(state.torrent_metadata_hashes)
+    next_metadata_pending = dict(state.torrent_metadata_pending)
     truncated = False
+    metadata_cursor_blocked = False
     torrserver_max_new = max(0, int(torrserver_max_new or 0))
+    torrserver_replay_successes = max(1, int(torrserver_replay_successes or 1))
     metadata_stats = {
         "attempted": 0,
         "enriched": 0,
+        "confirmed": 0,
+        "replay_pending": 0,
         "known": 0,
         "deferred": 0,
         "failed": 0,
@@ -189,7 +233,12 @@ async def crawl_once(
                             book.torrent = torrent_ref
                             torrent_status = "magnet_deferred"
                             metadata_stats["deferred"] += 1
+                            # Page 1 is always revisited. A deep page is not, so
+                            # do not let its cursor move past deferred metadata.
+                            if page != 1:
+                                metadata_cursor_blocked = True
                         else:
+                            was_pending = info_hash in next_metadata_pending
                             metadata_attempted = True
                             metadata_stats["attempted"] += 1
                             try:
@@ -206,14 +255,31 @@ async def crawl_once(
                                         f"{torrent_ref.info_hash} != {torrent.info_hash}"
                                     )
                                 book = hydrate_book_from_torrent(book, torrent)
-                                next_metadata_hashes.add(info_hash)
-                                torrent_status = "torrent_metainfo"
                                 metadata_stats["enriched"] += 1
+
+                                successes = next_metadata_pending.get(info_hash, 0) + 1
+                                if successes >= torrserver_replay_successes:
+                                    next_metadata_pending.pop(info_hash, None)
+                                    next_metadata_hashes.add(info_hash)
+                                    torrent_status = "torrent_metainfo_confirmed"
+                                    metadata_stats["confirmed"] += 1
+                                else:
+                                    next_metadata_pending[info_hash] = successes
+                                    torrent_status = "torrent_metainfo_replay_pending"
+                                    metadata_stats["replay_pending"] += 1
+                                    if page != 1:
+                                        metadata_cursor_blocked = True
                             except Exception as exc:
                                 book.torrent = torrent_ref
                                 torrent_status = "magnet_fallback"
                                 torrent_error = str(exc)[:500]
                                 metadata_stats["failed"] += 1
+                                # If this hash already had a successful deep-page
+                                # delivery, keep that page until its replay can
+                                # succeed. A first-time failure stays magnet-only
+                                # and does not permanently wedge the whole crawl.
+                                if was_pending and page != 1:
+                                    metadata_cursor_blocked = True
                     elif download_torrents:
                         metadata_attempted = True
                         try:
@@ -282,13 +348,23 @@ async def crawl_once(
                 backfill_complete=backfill_complete,
             )
 
-    if truncated or not advance_cursor:
+    cursor_held_for_metadata = bool(
+        advance_cursor and torrserver is not None and metadata_cursor_blocked
+    )
+
+    # Truncated/manual probes are non-persistent. A scheduled metadata hold is
+    # different: keep the forum cursors in place but preserve successful
+    # metadata state so the next run can skip/confirm already processed hashes.
+    if truncated or not advance_cursor or cursor_held_for_metadata:
         next_forums = dict(state.forums)
+    if truncated or not advance_cursor:
         next_metadata_hashes = set(state.torrent_metadata_hashes)
+        next_metadata_pending = dict(state.torrent_metadata_pending)
 
     next_state = RuTrackerState(
         forums=next_forums,
         torrent_metadata_hashes=next_metadata_hashes,
+        torrent_metadata_pending=next_metadata_pending,
     )
     return {
         "pages": page_trace,
@@ -298,6 +374,8 @@ async def crawl_once(
         "cursor_before": state.as_dict(),
         "cursor_after": next_state.as_dict(),
         "truncated": truncated,
+        "cursor_held_for_metadata": cursor_held_for_metadata,
+        "cursor_advanced": bool(advance_cursor and not truncated and not cursor_held_for_metadata),
         "topics_seen": len(seen_topics),
         "torrent_metadata": metadata_stats,
     }, next_state

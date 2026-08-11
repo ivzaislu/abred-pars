@@ -19,12 +19,18 @@ class TorrServerMetadataError(RuntimeError):
 
 
 class TorrServerClient:
-    """Minimal metadata-only TorrServer client.
+    """Minimal metadata-only TorrServer client for a shared instance.
 
-    The client never calls rem/drop/wipe and never saves a torrent to the
-    TorrServer database. It only reads an existing hash or temporarily adds a
-    magnet with ``save_to_db=false`` and waits until ``file_stats`` is ready.
-    This makes it safe to use with a shared TorrServer instance.
+    The client never calls ``rem``, ``drop`` or ``wipe`` and never saves a
+    magnet to the TorrServer database. Missing magnets are added with
+    ``save_to_db=false`` and are left to TorrServer's own inactive-torrent
+    timeout. That avoids racing with another app that may start using the same
+    torrent while the GitHub job is resolving metadata.
+
+    TorrServer's public ``file_stats[].id`` is a one-based, path-sorted stream
+    id. Abred stores zero-based catalog file indexes, so feed indexes are the
+    zero-based position in ``file_stats``; playback later resolves the real
+    TorrServer stream id by the persisted file path.
     """
 
     def __init__(
@@ -33,7 +39,7 @@ class TorrServerClient:
         base_url: str,
         username: str = "",
         password: str = "",
-        timeout_seconds: float = 45.0,
+        timeout_seconds: float = 30.0,
         poll_interval_seconds: float = 1.0,
         client: httpx.AsyncClient | None = None,
     ):
@@ -89,17 +95,8 @@ class TorrServerClient:
             return []
 
         files: list[ParsedTorrentFile] = []
-        seen_indexes: set[int] = set()
         for position, item in enumerate(raw_files):
             if not isinstance(item, dict):
-                continue
-            # TorrServer uses `omitempty` for id, therefore id=0 can be absent.
-            raw_index = item.get("id", position)
-            try:
-                index = int(raw_index)
-            except (TypeError, ValueError):
-                index = position
-            if index < 0 or index in seen_indexes:
                 continue
             path = str(item.get("path") or "").strip().replace("\\", "/")
             if not path:
@@ -110,12 +107,13 @@ class TorrServerClient:
                 size = 0
             ext = PurePosixPath(path).suffix.casefold()
             files.append(ParsedTorrentFile(
-                index=index,
+                # TorrServer web IDs are one-based stream IDs. Keep Abred's
+                # catalog index zero-based and path-addressable.
+                index=position,
                 path=path,
                 size_bytes=size,
                 media_type="audio" if ext in _AUDIO_EXTS else "other",
             ))
-            seen_indexes.add(index)
         return files
 
     async def ensure_metadata(self, info_hash: str, magnet_uri: str) -> ParsedTorrent:
