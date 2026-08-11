@@ -6,17 +6,17 @@ on:
       forums:
         description: "Comma-separated forum IDs; blank = all configured audiobook forums"
         required: false
-        default: "2387"
+        default: ""
         type: string
       max_topics:
         description: "Manual safety bound; 0 = unlimited. Truncated runs never advance cursors."
         required: false
-        default: "5"
+        default: "0"
         type: string
       advance_cursor:
         description: "Persist RuTracker cursor after a complete non-truncated run"
         required: false
-        default: false
+        default: true
         type: boolean
       download_torrents:
         description: "Optional enrichment: fetch .torrent metainfo through the Worker"
@@ -24,6 +24,7 @@ on:
         default: false
         type: boolean
   schedule:
+    # Every 6 hours at :47 UTC, staggered 30 minutes after Audiopolka.
     - cron: "47 */6 * * *"
 
 permissions:
@@ -41,7 +42,6 @@ env:
 
 jobs:
   crawl:
-    if: github.event_name == 'workflow_dispatch' || vars.RUTRACKER_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:

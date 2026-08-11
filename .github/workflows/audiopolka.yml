@@ -3,6 +3,7 @@ name: Audiopolka catalog feed
 on:
   workflow_dispatch:
   schedule:
+    # Every 6 hours at :17 UTC; RuTracker follows at :47.
     - cron: "17 */6 * * *"
 
 permissions:

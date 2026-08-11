@@ -1,0 +1,47 @@
+name: Cleanup catalog artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type DELETE-ALL to delete existing Audiopolka/RuTracker feed artifacts"
+        required: true
+        default: "NO"
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: cleanup-catalog-artifacts
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    if: inputs.confirm == 'DELETE-ALL'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Delete all existing Actions artifacts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t artifact_ids < <(
+            gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+              --jq '.artifacts[] | select((.name | startswith("audiopolka-feed-")) or (.name | startswith("rutracker-feed-"))) | .id'
+          )
+
+          echo "Artifacts found: ${#artifact_ids[@]}"
+
+          for artifact_id in "${artifact_ids[@]}"; do
+            echo "Deleting artifact ${artifact_id}"
+            gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}"
+          done
+
+          echo "Deleted artifacts: ${#artifact_ids[@]}"
