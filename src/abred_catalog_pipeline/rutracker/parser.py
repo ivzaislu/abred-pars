@@ -557,12 +557,13 @@ def normalize_topic_subject_title(raw_topic_title: str, authors: list[str]) -> s
 
 
 _KNOWN_POST_LABELS = {
-    "год выпуска", "автор", "авторы", "aвтор", "aвторы",
+    "год выпуска", "год издания", "автор", "авторы", "aвтор", "aвторы",
     "фамилия автора", "имя автора", "фамилия и имя автора", "фамилии авторов",
     "исполнитель", "исполнители", "читает", "чтец", "жанр", "жанры", "прочитано по изданию",
-    "тип издания", "категория", "аудиокодек", "битрейт", "вид битрейта",
+    "тип", "тип издания", "категория", "формат", "язык", "страна",
+    "аудиокодек", "аудио кодек", "битрейт", "битрейт аудио", "вид битрейта",
     "частота дискретизации", "количество каналов (моно-стерео)",
-    "время звучания", "продолжительность", "описание", "доп. информация",
+    "время звучания", "продолжительность", "продолжительность общая", "описание", "доп. информация",
     "цикл/серия", "цикл", "серия", "номер книги", "номер в серии", "№ книги",
 }
 
@@ -758,17 +759,74 @@ def _infer_narrators_from_subject(raw_topic_title: str) -> list[str]:
     return out
 
 
+_CATALOG_TITLE_TECH_RE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:аудиокнига|audio\s*book|mp3pro|mp3|мр3|m4a|m4b|aac|ogg|opus|flac|wav|wma)\b|"
+    r"\brip\s+\d{2,4}\s*(?:kbps|kbit/s|kb/s|кбит/с|кб/с)?\b|"
+    r"\b\d{2,4}\s*(?:kbps|kbit/s|kb/s|кбит/с|кб/с)\b"
+    r")"
+)
+
+
+def _is_author_only_title(value: str, authors: list[str]) -> bool:
+    text = _clean(value).strip(" :：;,.«»\"“”")
+    return bool(text and any(_same_person(text, author) for author in authors))
+
+
+def _clean_catalog_title_candidate(value: str, authors: list[str]) -> str:
+    text = normalize_topic_subject_title(value, authors) if value else ""
+    if not text:
+        return ""
+    text = re.sub(r"(?i)\s+[-–—]\s*CD\s+к\s+книге\s*$", "", text).strip()
+    marker = re.search(r"(?i)\s*\(\s*(?:аудиокнига|audio\s*book)\s*\)", text)
+    if marker and marker.start() >= 3:
+        text = text[:marker.start()]
+    else:
+        marker = _CATALOG_TITLE_TECH_RE.search(text)
+        if marker and marker.start() >= 3:
+            text = text[:marker.start()]
+    text = _clean(text).rstrip(" ,;:/-–—")
+    quoted = re.match(r'^[«"“](.+?)[»"”]\s+(.+)$', text)
+    if quoted and authors:
+        quoted_title = _clean(quoted.group(1))
+        possible_author = _clean(quoted.group(2))
+        if any(_same_person(possible_author, author) for author in authors) or _author_prefix_matches(possible_author, authors):
+            text = quoted_title
+    text = _clean(text).strip()
+    if len(text) >= 2 and (text[0], text[-1]) in {("\"", "\""), ("«", "»"), ("“", "”")}:
+        text = _clean(text[1:-1])
+    return text
+
+
+def _subject_still_looks_dirty(value: str) -> bool:
+    text = _clean(value)
+    if not text:
+        return False
+    if _CATALOG_TITLE_TECH_RE.search(text):
+        return True
+    if "[" in text or "]" in text:
+        return True
+    return bool(re.match(r"(?i)^\([^)]*(?:audio|musical|performance)[^)]*\)\s*VA\s*[-–—]", text))
+
+
 def _select_topic_title(raw_topic_title: str, body_title: str, authors: list[str]) -> str:
-    subject = normalize_topic_subject_title(raw_topic_title, authors)
-    body = normalize_topic_subject_title(body_title, authors) if body_title else ""
+    subject = _clean_catalog_title_candidate(raw_topic_title, authors)
+    body = _clean_catalog_title_candidate(body_title, authors) if body_title else ""
+    if body and not _is_author_only_title(body, authors):
+        subject_key, _ = _alnum_compact(subject)
+        body_key, _ = _alnum_compact(body)
+        equivalent = bool(subject_key and body_key and subject_key == body_key)
+        related = not subject or _body_title_related_to_subject(body, subject)
+        if related and (not subject or equivalent or _subject_still_looks_dirty(subject)):
+            return body
     if subject:
         return _heal_subject_soft_breaks(subject, body)
     return body
 
 
 def reconcile_repair_title(stored_title: str, parsed_title: str, authors: list[str]) -> str:
-    stored = normalize_topic_subject_title(stored_title, authors)
-    parsed = normalize_topic_subject_title(parsed_title, authors)
+    stored = _clean_catalog_title_candidate(stored_title, authors)
+    parsed = _clean_catalog_title_candidate(parsed_title, authors)
     if not stored:
         return parsed
     if not parsed:
