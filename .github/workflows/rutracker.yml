@@ -25,7 +25,7 @@ on:
         type: boolean
   schedule:
     # Every 6 hours at :47 UTC, staggered 30 minutes after Audiopolka.
-    - cron: "47 */6 * * *"
+    - cron: "47 */2 * * *"
 
 permissions:
   contents: write
