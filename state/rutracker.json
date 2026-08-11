@@ -1,9 +1,97 @@
 {
   "source": "rutracker",
   "forums": {
+    "399": {
+      "deep_page": 157,
+      "last_page": 162
+    },
+    "400": {
+      "deep_page": 60,
+      "last_page": 65
+    },
+    "402": {
+      "deep_page": 169,
+      "last_page": 174
+    },
+    "403": {
+      "deep_page": 43,
+      "last_page": 48
+    },
+    "467": {
+      "deep_page": 142,
+      "last_page": 147
+    },
+    "490": {
+      "deep_page": 102,
+      "last_page": 107
+    },
+    "499": {
+      "deep_page": 124,
+      "last_page": 129
+    },
+    "530": {
+      "deep_page": 4,
+      "last_page": 9
+    },
+    "574": {
+      "deep_page": 56,
+      "last_page": 61
+    },
+    "661": {
+      "deep_page": 205,
+      "last_page": 210
+    },
+    "695": {
+      "deep_page": 8,
+      "last_page": 13
+    },
+    "716": {
+      "deep_page": 15,
+      "last_page": 20
+    },
+    "1036": {
+      "deep_page": 49,
+      "last_page": 54
+    },
+    "1350": {
+      "deep_page": 9,
+      "last_page": 14
+    },
+    "2127": {
+      "deep_page": 19,
+      "last_page": 24
+    },
+    "2137": {
+      "deep_page": 134,
+      "last_page": 139
+    },
+    "2152": {
+      "deep_page": 15,
+      "last_page": 20
+    },
+    "2165": {
+      "deep_page": 41,
+      "last_page": 46
+    },
+    "2325": {
+      "deep_page": 24,
+      "last_page": 29
+    },
+    "2342": {
+      "deep_page": 2,
+      "last_page": 2
+    },
+    "2348": {
+      "deep_page": 11,
+      "last_page": 16
+    },
     "2387": {
       "deep_page": 389,
       "last_page": 394
+    },
+    "2388": {
+      "deep_page": 112,
+      "last_page": 117
     }
   }
 }
