@@ -1,4 +1,9 @@
 {
   "source": "rutracker",
-  "forums": {}
+  "forums": {
+    "2387": {
+      "deep_page": 389,
+      "last_page": 394
+    }
+  }
 }
