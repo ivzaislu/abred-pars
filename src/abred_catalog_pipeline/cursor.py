@@ -10,6 +10,7 @@ class CrawlCursor:
     source: str = "audiopolka"
     deep_page: int | None = None
     last_page: int | None = None
+    backfill_complete: bool = False
 
     @classmethod
     def load(cls, path: str | Path) -> "CrawlCursor":
@@ -21,6 +22,7 @@ class CrawlCursor:
             source=str(data.get("source") or "audiopolka"),
             deep_page=_positive_or_none(data.get("deep_page")),
             last_page=_positive_or_none(data.get("last_page")),
+            backfill_complete=bool(data.get("backfill_complete", False)),
         )
 
     def save(self, path: str | Path) -> None:
@@ -39,16 +41,30 @@ def _positive_or_none(value: object) -> int | None:
     return parsed if parsed >= 1 else None
 
 
-def plan_pages(*, last_page: int, deep_page: int | None, backfill_pages: int = 5) -> tuple[list[int], int]:
-    """Return [page 1 + descending backfill] and the next deep cursor.
+def plan_pages(
+    *,
+    last_page: int,
+    deep_page: int | None,
+    backfill_pages: int = 5,
+    backfill_complete: bool = False,
+) -> tuple[list[int], int | None, bool]:
+    """Return page 1 + finite descending bootstrap pages.
 
-    Page 1 is always scanned. Backfill never includes page 1. Reaching page 2
-    wraps the next run back to the current last page.
+    Once page 2 has been scanned, bootstrap is permanently complete and
+    subsequent runs scan page 1 only. There is deliberately no wrap back to
+    the current last page.
     """
     last_page = max(1, int(last_page))
     backfill_pages = max(0, int(backfill_pages))
-    if last_page == 1 or backfill_pages == 0:
-        return [1], last_page
+
+    if backfill_complete:
+        return [1], None, True
+
+    if last_page == 1:
+        return [1], None, True
+
+    if backfill_pages == 0:
+        return [1], deep_page or last_page, False
 
     start = int(deep_page or last_page)
     if start < 2 or start > last_page:
@@ -58,7 +74,7 @@ def plan_pages(*, last_page: int, deep_page: int | None, backfill_pages: int = 5
     backfill = [page for page in backfill if page >= 2]
     pages = [1, *backfill]
 
-    next_deep = start - len(backfill)
-    if next_deep < 2:
-        next_deep = last_page
-    return pages, next_deep
+    if 2 in backfill:
+        return pages, None, True
+
+    return pages, start - len(backfill), False
