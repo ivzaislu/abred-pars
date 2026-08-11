@@ -86,7 +86,7 @@ async def crawl_once(
     forum_ids: tuple[int, ...],
     backfill_pages: int = 5,
     max_topics: int = 0,
-    download_torrents: bool = True,
+    download_torrents: bool = False,
     advance_cursor: bool = True,
 ) -> tuple[dict, RuTrackerState]:
     records: list[dict] = []
@@ -134,7 +134,11 @@ async def crawl_once(
                     if not torrent_ref.total_size_bytes and row.size_bytes:
                         torrent_ref.total_size_bytes = row.size_bytes
 
-                    torrent_status = "magnet_only"
+                    # Magnet/info-hash from viewtopic is the primary transport identity.
+                    # Raw .torrent metainfo is an optional enrichment only; a Worker
+                    # that cannot proxy dl.php must not turn a valid magnet record
+                    # into a rejected topic.
+                    torrent_status = "magnet"
                     torrent_error = ""
                     if download_torrents:
                         try:
@@ -159,6 +163,7 @@ async def crawl_once(
                             if not torrent_ref.info_hash:
                                 raise
                             book.torrent = torrent_ref
+                            torrent_status = "magnet_fallback"
                             torrent_error = str(exc)[:500]
                     else:
                         book.torrent = torrent_ref
@@ -174,6 +179,7 @@ async def crawl_once(
                         "leechers": row.leechers,
                         "listed_size_bytes": row.size_bytes,
                         "torrent_metadata_status": torrent_status,
+                        "torrent_metadata_attempted": bool(download_torrents),
                         "torrent_metadata_error": torrent_error or None,
                     }
                     if book.series_entries and record.get("series"):

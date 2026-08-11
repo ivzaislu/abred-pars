@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1-v3 (magnet-first production contract)
+
+- Made RuTracker `viewtopic` magnet + BTIH info-hash the primary successful transport contract.
+- Normal CLI, scheduled runs and manual workflow probes no longer request `dl.php`.
+- Raw `.torrent` retrieval is now explicit opt-in enrichment via `--download-torrents`.
+- Added `torrent_metadata_attempted` and deterministic statuses: `magnet`, `torrent_metainfo`, `magnet_fallback`.
+- Optional `.torrent` failures are non-blocking when a valid topic magnet/info-hash exists.
+- Preserved the v2 `--no-torrent-download` flag as a hidden compatibility alias.
+
 ## 0.1.1-v2 (production probe hardening)
 
 - Raw `.torrent` requests now send the topic `Referer`, matching the proven backend transport contract.

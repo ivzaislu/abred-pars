@@ -19,9 +19,9 @@ on:
         default: false
         type: boolean
       download_torrents:
-        description: "Fetch .torrent metainfo through the Worker for file metadata"
+        description: "Optional enrichment: fetch .torrent metainfo through the Worker"
         required: false
-        default: true
+        default: false
         type: boolean
   schedule:
     - cron: "47 */6 * * *"
@@ -84,8 +84,8 @@ jobs:
             if [[ "${{ inputs.advance_cursor }}" == "true" ]]; then
               args+=(--advance-cursor)
             fi
-            if [[ "${{ inputs.download_torrents }}" != "true" ]]; then
-              args+=(--no-torrent-download)
+            if [[ "${{ inputs.download_torrents }}" == "true" ]]; then
+              args+=(--download-torrents)
             fi
           else
             args+=(--advance-cursor)

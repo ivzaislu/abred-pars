@@ -39,6 +39,17 @@ python -m abred_catalog_pipeline run-rutracker \
   --out artifacts
 ```
 
+Optional raw `.torrent` enrichment probe (not required for a valid feed):
+
+```bash
+python -m abred_catalog_pipeline run-rutracker \
+  --forums 2387 \
+  --max-topics 5 \
+  --download-torrents \
+  --state state/rutracker.json \
+  --out artifacts
+```
+
 A full cursor-advancing run uses all configured audiobook forums and the roadmap schedule `page 1 + five descending backfill pages` independently for each forum:
 
 ```bash
@@ -48,7 +59,7 @@ python -m abred_catalog_pipeline run-rutracker \
   --out artifacts
 ```
 
-The stable source identity is the RuTracker `topic_id`, never the viewforum page number. `viewforum.php` discovers topics; `viewtopic.php?t=<topic_id>` supplies metadata. The parser keeps magnet/info-hash data and attempts to fetch `.torrent` metainfo through the same Worker to obtain the concrete file list and chapter transport indexes. Torrent downloads send the source topic URL as `Referer`, matching the production backend transport contract. If metainfo is unavailable but the topic exposes a valid BTIH magnet, the record remains usable as `magnet_only` and the feed records that diagnostic instead of inventing files.
+The stable source identity is the RuTracker `topic_id`, never the viewforum page number. `viewforum.php` discovers topics; `viewtopic.php?t=<topic_id>` supplies metadata. **Magnet + BTIH info-hash are the primary transport identity.** A normal run does not call `dl.php` and emits `torrent_metadata_status=magnet` with an empty file list until the backend/TorrServer resolves concrete files. Raw `.torrent` metainfo is an optional probe/enrichment only: pass `--download-torrents` (or enable the manual workflow checkbox) to try it through the same Worker. If that optional request fails while the topic still has a valid BTIH magnet, the record remains successful as `magnet_fallback`; the diagnostic is retained but the topic is not rejected.
 
 ## Feed bundle
 

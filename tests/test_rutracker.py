@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from abred_catalog_pipeline.models import book_to_feed_record
-from abred_catalog_pipeline.rutracker.crawler import RuTrackerState, ForumCursor, parse_forum_ids
+from abred_catalog_pipeline.rutracker.crawler import RuTrackerState, ForumCursor, crawl_once, parse_forum_ids
 from abred_catalog_pipeline.rutracker.parser import (
     DEFAULT_AUDIOBOOK_FORUM_IDS,
     RuTrackerWorkerClient,
@@ -178,3 +178,87 @@ def test_worker_torrent_request_sends_topic_referer():
         assert seen["target"] == "https://rutracker.org/forum/dl.php?t=123"
     finally:
         asyncio.run(parser.aclose())
+
+
+class _ProbeParser:
+    base_url = "https://rutracker.org"
+    page_size = 50
+
+    def __init__(self, *, torrent_error: Exception | None = None):
+        self.torrent_error = torrent_error
+        self.torrent_calls = 0
+
+    def forum_url(self, forum_id: int, page: int) -> str:
+        start = "" if page == 1 else f"&start={(page - 1) * self.page_size}"
+        return f"https://rutracker.org/forum/viewforum.php?f={forum_id}{start}"
+
+    def topic_url(self, topic_id: str) -> str:
+        return f"https://rutracker.org/forum/viewtopic.php?t={topic_id}"
+
+    def torrent_url(self, topic_id: str) -> str:
+        return f"https://rutracker.org/forum/dl.php?t={topic_id}"
+
+    async def get_html(self, url: str) -> str:
+        if "viewforum.php" in url:
+            return (FIX / "rutracker_viewforum.html").read_text()
+        return (FIX / "rutracker_real_topic.html").read_text()
+
+    async def get_torrent(self, url: str, *, referer: str = "") -> bytes:
+        self.torrent_calls += 1
+        if self.torrent_error is not None:
+            raise self.torrent_error
+        return _torrent_fixture()
+
+
+def test_crawl_is_magnet_first_and_does_not_call_dl_by_default():
+    import asyncio
+
+    parser = _ProbeParser()
+    result, next_state = asyncio.run(
+        crawl_once(
+            parser,
+            RuTrackerState(),
+            forum_ids=(2387,),
+            max_topics=1,
+            download_torrents=False,
+            advance_cursor=False,
+        )
+    )
+
+    assert parser.torrent_calls == 0
+    assert result["rejected"] == []
+    assert len(result["records"]) == 1
+    record = result["records"][0]
+    assert record["torrent"]["info_hash"] == "7fd5e9a38677655779a77cd224abd734c56aebdf"
+    assert record["torrent"]["files"] == []
+    assert record["torrent"]["total_size_bytes"] > 0
+    assert record["rutracker"]["torrent_metadata_status"] == "magnet"
+    assert record["rutracker"]["torrent_metadata_attempted"] is False
+    assert record["rutracker"]["torrent_metadata_error"] is None
+    assert next_state.as_dict() == RuTrackerState().as_dict()
+
+
+def test_optional_torrent_failure_falls_back_to_magnet_without_rejecting_topic():
+    import asyncio
+
+    parser = _ProbeParser(torrent_error=RuntimeError("403 Forbidden"))
+    result, _ = asyncio.run(
+        crawl_once(
+            parser,
+            RuTrackerState(),
+            forum_ids=(2387,),
+            max_topics=1,
+            download_torrents=True,
+            advance_cursor=False,
+        )
+    )
+
+    assert parser.torrent_calls == 1
+    assert result["rejected"] == []
+    assert len(result["records"]) == 1
+    record = result["records"][0]
+    assert record["torrent"]["info_hash"] == "7fd5e9a38677655779a77cd224abd734c56aebdf"
+    assert record["torrent"]["files"] == []
+    assert record["rutracker"]["torrent_metadata_status"] == "magnet_fallback"
+    assert record["rutracker"]["torrent_metadata_attempted"] is True
+    assert "403 Forbidden" in record["rutracker"]["torrent_metadata_error"]

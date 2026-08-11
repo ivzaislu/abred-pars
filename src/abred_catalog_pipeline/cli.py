@@ -78,7 +78,7 @@ async def _run_rutracker(args: argparse.Namespace) -> int:
             forum_ids=parse_forum_ids(args.forums),
             backfill_pages=args.backfill_pages,
             max_topics=max(0, int(args.max_topics or 0)),
-            download_torrents=not args.no_torrent_download,
+            download_torrents=bool(args.download_torrents),
             advance_cursor=bool(args.advance_cursor),
         )
     finally:
@@ -141,7 +141,20 @@ def build_parser() -> argparse.ArgumentParser:
     rt.add_argument("--page-size", type=int, default=50)
     rt.add_argument("--backfill-pages", type=int, default=5)
     rt.add_argument("--max-topics", type=int, default=0, help="manual probe bound; truncated runs never advance cursors")
-    rt.add_argument("--no-torrent-download", action="store_true")
+    torrent_mode = rt.add_mutually_exclusive_group()
+    torrent_mode.add_argument(
+        "--download-torrents",
+        dest="download_torrents",
+        action="store_true",
+        help="optional enrichment: fetch raw .torrent metainfo through the Worker",
+    )
+    torrent_mode.add_argument(
+        "--no-torrent-download",
+        dest="download_torrents",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+    rt.set_defaults(download_torrents=False)
     rt.add_argument("--advance-cursor", action="store_true")
     rt.add_argument("--delay", type=float, default=0.15)
     rt.add_argument("--run-id", default="")
