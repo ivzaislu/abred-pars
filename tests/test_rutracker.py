@@ -141,3 +141,40 @@ def test_rutracker_state_roundtrip(tmp_path):
     state.save(path)
     loaded = RuTrackerState.load(path)
     assert loaded.as_dict() == state.as_dict()
+
+
+def test_worker_torrent_request_sends_topic_referer():
+    import asyncio
+    import httpx
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["referer"] = request.headers.get("Referer")
+        seen["token"] = request.headers.get("X-Proxy-Token")
+        seen["target"] = request.headers.get("X-RuTracker-Target")
+        return httpx.Response(200, content=b"d4:infode")
+
+    parser = RuTrackerWorkerClient(
+        worker_url="https://worker.example",
+        worker_token="secret",
+        delay_seconds=0,
+    )
+    old_client = parser.client
+    parser.client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True)
+    asyncio.run(old_client.aclose())
+    try:
+        data = asyncio.run(
+            parser.get_torrent(
+                "https://rutracker.org/forum/dl.php?t=123",
+                referer="https://rutracker.org/forum/viewtopic.php?t=123",
+            )
+        )
+        assert data.startswith(b"d")
+        assert seen["url"] == "https://worker.example/forum/dl.php?t=123"
+        assert seen["referer"] == "https://rutracker.org/forum/viewtopic.php?t=123"
+        assert seen["token"] == "secret"
+        assert seen["target"] == "https://rutracker.org/forum/dl.php?t=123"
+    finally:
+        asyncio.run(parser.aclose())

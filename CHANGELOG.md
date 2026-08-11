@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1-v2 (production probe hardening)
+
+- Raw `.torrent` requests now send the topic `Referer`, matching the proven backend transport contract.
+- Magnet-only fallback keeps the `viewforum` listed release size instead of reporting zero bytes.
+- Added a regression test asserting Worker token, target and topic Referer on `dl.php` requests.
+
 ## 0.1.1
 
 - Added RuTracker catalog pipeline through a Cloudflare Worker only; no direct GitHub runner -> RuTracker traffic.

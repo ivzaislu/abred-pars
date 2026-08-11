@@ -1523,7 +1523,13 @@ class RuTrackerWorkerClient:
             suffix += "?" + parsed.query
         return self.worker_url + suffix
 
-    async def _request(self, target_url: str, *, accept: str) -> httpx.Response:
+    async def _request(
+        self,
+        target_url: str,
+        *,
+        accept: str,
+        referer: str = "",
+    ) -> httpx.Response:
         if not self.worker_url:
             raise RuntimeError("RUTRACKER_WORKER_URL is required")
         if not self.worker_token:
@@ -1534,6 +1540,8 @@ class RuTrackerWorkerClient:
         headers = self._headers()
         headers["Accept"] = accept
         headers["X-RuTracker-Target"] = target_url
+        if referer:
+            headers["Referer"] = referer
         response = await self.client.get(self._request_url(target_url), headers=headers)
         response.raise_for_status()
         return response
@@ -1542,8 +1550,12 @@ class RuTrackerWorkerClient:
         response = await self._request(target_url, accept="text/html,application/xhtml+xml")
         return _decode_html(response.content, response.encoding)
 
-    async def get_torrent(self, target_url: str) -> bytes:
-        response = await self._request(target_url, accept="application/x-bittorrent,*/*;q=0.8")
+    async def get_torrent(self, target_url: str, *, referer: str = "") -> bytes:
+        response = await self._request(
+            target_url,
+            accept="application/x-bittorrent,*/*;q=0.8",
+            referer=referer,
+        )
         data = response.content
         if not data.startswith(b"d"):
             content_type = response.headers.get("content-type", "")

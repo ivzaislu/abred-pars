@@ -48,7 +48,7 @@ python -m abred_catalog_pipeline run-rutracker \
   --out artifacts
 ```
 
-The stable source identity is the RuTracker `topic_id`, never the viewforum page number. `viewforum.php` discovers topics; `viewtopic.php?t=<topic_id>` supplies metadata. The parser keeps magnet/info-hash data and attempts to fetch `.torrent` metainfo through the same Worker to obtain the concrete file list and chapter transport indexes. If metainfo is unavailable but the topic exposes a valid BTIH magnet, the record remains usable as `magnet_only` and the feed records that diagnostic instead of inventing files.
+The stable source identity is the RuTracker `topic_id`, never the viewforum page number. `viewforum.php` discovers topics; `viewtopic.php?t=<topic_id>` supplies metadata. The parser keeps magnet/info-hash data and attempts to fetch `.torrent` metainfo through the same Worker to obtain the concrete file list and chapter transport indexes. Torrent downloads send the source topic URL as `Referer`, matching the production backend transport contract. If metainfo is unavailable but the topic exposes a valid BTIH magnet, the record remains usable as `magnet_only` and the feed records that diagnostic instead of inventing files.
 
 ## Feed bundle
 

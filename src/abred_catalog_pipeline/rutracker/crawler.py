@@ -127,12 +127,21 @@ async def crawl_once(
                     torrent_ref = book.torrent or ParsedTorrent(info_hash="", torrent_url=row.torrent_url)
                     torrent_ref.seeders = row.seeders
                     torrent_ref.leechers = row.leechers
+                    # The viewforum row already has the release size. Keep it as
+                    # a useful fallback even when raw .torrent metainfo cannot be
+                    # downloaded yet. Successful metainfo parsing replaces this
+                    # with the exact bencoded file-size sum below.
+                    if not torrent_ref.total_size_bytes and row.size_bytes:
+                        torrent_ref.total_size_bytes = row.size_bytes
 
                     torrent_status = "magnet_only"
                     torrent_error = ""
                     if download_torrents:
                         try:
-                            raw_torrent = await parser.get_torrent(row.torrent_url or parser.torrent_url(row.topic_id))
+                            raw_torrent = await parser.get_torrent(
+                                row.torrent_url or parser.torrent_url(row.topic_id),
+                                referer=parser.topic_url(row.topic_id),
+                            )
                             torrent = parse_torrent_bytes(
                                 raw_torrent,
                                 magnet_uri=torrent_ref.magnet_uri,
