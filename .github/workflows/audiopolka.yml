@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # Every 6 hours at :17 UTC; RuTracker follows at :47.
-    - cron: "17 */1 * * *"
+    - cron: "17 */9 * * *"
 
 permissions:
   contents: write
