@@ -36,6 +36,7 @@ jobs:
           python -m abred_catalog_pipeline run-audiopolka \
             --state state/audiopolka.json \
             --out artifacts \
+            --backfill-pages 15 \
             | tee crawl-result.json
 
       - name: Persist cursor
