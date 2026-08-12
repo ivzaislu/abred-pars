@@ -89,3 +89,55 @@ def test_legacy_subject_author_without_body_title():
 def test_fallback_people_are_reflected_in_metadata_fields():
     book = parse("Священный Коран. Чтец Mohd Altablawi [2000, 56 kbps, MP3]")
     assert "narrators" in book.metadata_fields_present
+
+
+def test_author_narrator_markers_resolve_to_author_name():
+    for marker in ("автор", "читает автор", "автор (ЛИ)"):
+        book = parse(
+            f"Логинов А.А. - Горсть бисера [{marker}, 2008, 128 kbps]",
+            field("Автор", "Логинов А.А.") + field("Исполнитель", marker),
+        )
+        assert book.narrators == ["Логинов А.А."]
+
+
+def test_descriptive_narrator_fields_are_reduced_to_people():
+    cases = {
+        "Коран читает Хусам Абдурахман": ["Хусам Абдурахман"],
+        "читает и поёт Иван Рассомахин (ЛИ)": ["Иван Рассомахин"],
+        "Читает Св.Харлап. Музыка Л.Казаковой.": ["Св.Харлап"],
+        "Юрий Гальцев - читает стихи, передразнивает звуки": ["Юрий Гальцев"],
+    }
+    for raw, expected in cases.items():
+        book = parse("Автор - Название [исполнитель, 2000, MP3]",
+                     field("Автор", "Автор") + field("Исполнитель", raw))
+        assert book.narrators == expected
+
+
+def test_empty_given_name_does_not_consume_next_label():
+    fields = (
+        field("Фамилия автора", "Тур Екатерина")
+        + field("Имя автора", "")
+        + field("Исполнитель", "Екатерина Тур")
+    )
+    book = parse("Тур Екатерина - Психосоматика [Екатерина Тур, 2023, MP3]", fields)
+    assert book.authors == ["Тур Екатерина"]
+
+
+def test_series_audiobook_label_is_not_part_of_book_title():
+    cases = (
+        ("Али Мухаммед - История Халифата Аудиокнига. Умар ибн аль-Хаттаб [2013, MP3]",
+         "История Халифата", "Умар ибн аль-Хаттаб"),
+        ("Умар аль-Ашкар - «Исламские науки» Аудиокнига: «Исламская акида» [2016, MP3]",
+         "Исламские науки", "Исламская акида"),
+    )
+    for subject, series, expected in cases:
+        book = parse(subject, field("Автор", "Автор") + field("Цикл/серия", series))
+        assert book.title == expected
+
+
+def test_loose_release_tail_after_brackets_is_removed():
+    book = parse("Андрей Родионов - Пельмени устрицы - CD к книге [автор, 2004], MP3, 124 kbps",
+                 field("Автор", "Андрей Родионов") + field("Исполнитель", "автор"),
+                 "Пельмени устрицы")
+    assert book.title == "Пельмени устрицы"
+    assert book.narrators == ["Андрей Родионов"]
