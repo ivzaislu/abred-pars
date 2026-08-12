@@ -1,0 +1,29 @@
+name: RuTracker people parser final validation
+
+on:
+  push:
+    branches:
+      - agent/rutracker-people-parser
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[test]'
+      - name: Targeted RuTracker regression tests
+        run: |
+          pytest -q tests/test_rutracker_confirmed_people_regressions.py tests/test_rutracker_title_cleanup.py tests/test_rutracker.py
+      - name: Full test suite
+        run: pytest -q
