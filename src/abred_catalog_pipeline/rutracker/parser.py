@@ -140,15 +140,60 @@ def _size_bytes(raw: str) -> int:
 
 def _duration_seconds(raw: str) -> int:
     value = _clean(raw)
-    m = re.search(r"(?<!\d)(\d{1,3}):(\d{2}):(\d{2})(?!\d)", value)
+    clock_matches = list(
+        re.finditer(r"(?<!\d)(\d{1,3}):(\d{2}):(\d{2})(?!\d)", value)
+    )
+    if clock_matches:
+        durations = [
+            int(match.group(1)) * 3600
+            + int(match.group(2)) * 60
+            + int(match.group(3))
+            for match in clock_matches
+        ]
+        if len(clock_matches) > 1 and all(
+            re.fullmatch(r"\s*\+\s*", value[left.end():right.start()])
+            for left, right in zip(clock_matches, clock_matches[1:])
+        ):
+            return sum(durations)
+        return durations[0]
+    minute_matches = list(
+        re.finditer(r"(?<!\d)(\d{1,3}):(\d{2})(?!\d)", value)
+    )
+    if minute_matches:
+        durations = [
+            int(match.group(1)) * 60 + int(match.group(2))
+            for match in minute_matches
+        ]
+        if len(minute_matches) > 1 and all(
+            re.fullmatch(r"\s*\+\s*", value[left.end():right.start()])
+            for left, right in zip(minute_matches, minute_matches[1:])
+        ):
+            return sum(durations)
+        return durations[0]
+    m = re.search(
+        r"(?<!\d)(\d{1,3})\s*"
+        r"(?:ч(?:ас(?:а|ов)?)?\.?)"
+        r"(?:\s*(\d{1,2})\s*(?:м(?:ин(?:ут(?:а|ы)?)?)?\.?))?"
+        r"(?:\s*(\d{1,2})\s*(?:с(?:ек(?:унд(?:а|ы)?)?)?\.?))?",
+        value,
+        re.I,
+    )
     if m:
-        h, minute, sec = map(int, m.groups())
+        h = int(m.group(1))
+        minute = int(m.group(2) or 0)
+        sec = int(m.group(3) or 0)
         return h * 3600 + minute * 60 + sec
-    m = re.search(r"(?<!\d)(\d{1,3}):(\d{2})(?!\d)", value)
-    if m:
-        minute, sec = map(int, m.groups())
-        return minute * 60 + sec
     return 0
+
+
+def _duration_from_extra_info(raw: str) -> int:
+    """Read only an explicitly labelled total from a free-form info block."""
+    match = re.search(
+        r"(?i)\b(?:общее(?:\s+время)?\s+звучани[ея]|продолжительность)\b"
+        r"\s*[:\-]?\s*.{0,80}",
+        _clean(raw),
+    )
+    return _duration_seconds(match.group(0)) if match else 0
 
 
 def parse_tracker_html(html: str, base_url: str) -> list[TrackerRow]:
@@ -239,7 +284,7 @@ _STANDALONE_PEOPLE_NOISE = {
     "иеромонах", "священник", "отец",
     "др", "др.", "другие",
     # Service marker seen in RuTracker narrator metadata, not a person.
-    "ли",
+    "ли", "подробности далее",
 }
 
 
@@ -259,6 +304,17 @@ def _normalize_person_item(value: str) -> str:
     if not item:
         return ""
 
+    # Repair only unmatched edge brackets. Balanced aliases such as
+    # ``Сергей Русскин (Сундар Дути)`` must stay untouched.
+    edge_pairs = (("[", "]"), ("(", ")"), ("{", "}"))
+    for opening, closing in edge_pairs:
+        if item.endswith(closing) and item.count(closing) > item.count(opening):
+            item = item[:-1].rstrip()
+        if item.startswith(opening) and item.count(opening) > item.count(closing):
+            item = item[1:].lstrip()
+    item = re.sub(r"\s+([)\]}])", r"\1", item)
+    item = re.sub(r"([(\[{])\s+", r"\1", item)
+
     # Remove only a sentence-ending dot after a full final token.
     # Initials such as "Райро А." remain unchanged.
     match = re.search(r"([A-Za-zА-Яа-яЁё-]+)\.$", item)
@@ -268,25 +324,127 @@ def _normalize_person_item(value: str) -> str:
     return item
 
 
+def _split_people_top_level(value: str) -> list[str]:
+    """Split comma-like separators without breaking parenthesized aliases."""
+    out: list[str] = []
+    current: list[str] = []
+    stack: list[str] = []
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    closings = set(pairs.values())
+
+    for char in value:
+        if char in pairs:
+            stack.append(pairs[char])
+        elif char in closings and stack and char == stack[-1]:
+            stack.pop()
+        if char in ",;/" and not stack:
+            part = _clean("".join(current))
+            if part:
+                out.append(part)
+            current = []
+            continue
+        current.append(char)
+
+    part = _clean("".join(current))
+    if part:
+        out.append(part)
+    return out
+
+
+def _looks_like_conjoined_person(value: str) -> bool:
+    candidate = _clean(value)
+    candidate = re.sub(
+        r"(?i)^(?:архимандрит|протоиерей|иеромонах|священник|отец)\s+",
+        "",
+        candidate,
+    )
+    return _looks_like_person_prefix(candidate)
+
+
 def _split_people(value: str) -> list[str]:
     if not value:
         return []
     out: list[str] = []
-    for raw_item in re.split(r"\s*(?:,|;|/| и )\s*", value):
-        item = _normalize_person_item(raw_item)
-        if not item:
-            continue
-        if item not in out:
-            out.append(item)
+    for top_level_item in _split_people_top_level(value):
+        top_level_item = re.sub(r"(?i)\s+и\s+др\.?\s*$", "", top_level_item).strip()
+        conjunction_parts = re.split(r"\s+и\s+", top_level_item, flags=re.I)
+        raw_items = (
+            conjunction_parts
+            if len(conjunction_parts) > 1
+            and all(_looks_like_conjoined_person(part) for part in conjunction_parts)
+            else [top_level_item]
+        )
+        for raw_item in raw_items:
+            item = _normalize_person_item(raw_item)
+            if item and item not in out:
+                out.append(item)
     return out
 
 
 def _normalize_author_item(value: str) -> str:
     item = _normalize_person_item(value)
+    if re.fullmatch(
+        r"(?i)(?:до|с|по|после)\s+(?:\d{1,2}|[IVXLCDM]+)\s*"
+        r"(?:век(?:а|ов)?|в\.)",
+        item,
+    ):
+        return ""
     # Some old templates put the literal label into the value itself.
     # Restrict removal to a leading label followed by a capitalized name so
     # values such as "автор неизвестен" and "Анонимный автор" stay intact.
-    return re.sub(r"^[Аа]втор\s+(?=[A-ZА-ЯЁ])", "", item).strip()
+    item = re.sub(r"^[Аа]втор\s+(?=[A-ZА-ЯЁ])", "", item).strip()
+    # Keep contribution roles out of the person display name. The role itself
+    # cannot currently be represented by the feed schema.
+    item = re.sub(
+        r"(?i)\s+[-–—]\s+(?:идея|стихи|текст|сценарий|составитель)\s*$",
+        "",
+        item,
+    ).strip()
+    item = re.sub(
+        r"(?i)\s*\(\s*(?:перевод|пер\.)\b[^()]*\)\s*$",
+        "",
+        item,
+    ).strip()
+    return item
+
+
+def _strip_person_honorific(value: str) -> str:
+    return re.sub(
+        r"(?i)^(?:(?:(?:заслуженн(?:ый|ая|ые)|народн(?:ый|ая|ые))\s+|"
+        r"(?:засл|нар)\.\s*)артист(?:ка|ы)?(?:\s+(?:РФ|России|СССР))?)"
+        r"\s*[,;:—–-]*\s*",
+        "",
+        _clean(value),
+    ).strip()
+
+
+def _normalize_narrator_item(value: str) -> str:
+    item = _normalize_person_item(value)
+    if not item:
+        return ""
+    if re.match(r"(?i)^(?:синхронный\s+)?перевод(?:чик|чики)?\b", item):
+        return ""
+    if re.match(r"(?i)^реж(?:исс[её]р)?\.?\s*[:：]", item):
+        return ""
+
+    item = re.sub(
+        r"(?i)^(?:акт(?:ер|ёр|риса)?\.?|лектор|диктор)\s*[:：]\s*",
+        "",
+        item,
+    )
+    item = re.sub(r"(?i)^от\s+автора\s*[-–—:：]\s*", "", item)
+
+    # Cast lists commonly use ``Role — Person``. Select the final segment only
+    # when it independently looks like a person, so hyphenated names survive.
+    role_parts = re.split(r"\s+[-–—]\s+", item)
+    if len(role_parts) > 1:
+        candidate = _strip_person_honorific(role_parts[-1])
+        candidate_people = _split_people(candidate)
+        if candidate_people and all(_looks_like_person_prefix(x) for x in candidate_people):
+            item = candidate
+
+    item = _strip_person_honorific(item)
+    return _normalize_person_item(item)
 
 
 def _topic_narrators(value: str, authors: list[str]) -> list[str]:
@@ -318,7 +476,13 @@ def _topic_narrators(value: str, authors: list[str]) -> list[str]:
     raw = re.sub(r"(?i)^читает\s+", "", raw)
     raw = re.split(r"(?i)\.\s*музыка\b", raw, maxsplit=1)[0]
     raw = re.split(r"(?i)\s+-\s+(?:читает|исполняет|передразнивает)\b", raw, maxsplit=1)[0]
-    return _split_people(raw)
+    out: list[str] = []
+    for value in _split_people(raw):
+        item = _normalize_narrator_item(value)
+        for person in _split_people(item):
+            if person and person not in out:
+                out.append(person)
+    return out
 
 
 def _post_cast_narrators(post) -> list[str]:
@@ -438,7 +602,7 @@ _RELEASE_META_RE = re.compile(
 _AUTHOR_PREFIX_NOISE = {
     "и", "др", "and", "et", "al",
     "митрополит", "епископ", "архиепископ", "архимандрит", "протоиерей",
-    "иеромонах", "священник", "отец",
+    "иеромонах", "монах", "священник", "отец",
 }
 
 
@@ -814,7 +978,14 @@ def _infer_author_from_subject(raw_topic_title: str, body_title: str) -> str:
     if quote:
         left = _clean(quote.group(1))
         right = _clean(quote.group(2))
-        if _looks_like_person_prefix(left) and subject_match(right):
+        # This pattern is for ``Author "Title"``. A candidate that starts
+        # with a quotation mark is the quoted title before its closing quote,
+        # not an author (legacy topic 161972).
+        if (
+            not left.startswith(('«', '"', '“'))
+            and _looks_like_person_prefix(left)
+            and subject_match(right)
+        ):
             return left
 
     # Old topics also use "Author. Title" and "Surname I.O. Title".
@@ -1148,7 +1319,8 @@ def _cover_from_post(post, base_url: str) -> str:
 
 
 _SERIES_HEADING_RE = re.compile(
-    r'(?i)^(?:цикл\s*/\s*серия|серия|цикл|книги\s+цикла|книги\s+серии)'
+    r'(?i)^(?:цикл\s*/\s*серия|серия|цикл|книги\s+цикла|книги\s+серии|'
+    r'произведения\s+цикла|произведения\s+серии)'
     r'\s*(?:[:：\-]\s*)?(.+?)$'
 )
 
@@ -1163,6 +1335,11 @@ def _series_heading_name(value: str) -> str:
     raw_name = _clean(m.group(1))
     quoted = re.search(r'[«"“](.+?)[»"”]', raw_name)
     name = _clean(quoted.group(1) if quoted else raw_name).strip('«»"“” \t')
+    name = re.sub(
+        r"(?i)\s*\((?:вышедшие|изданные|опубликованные)\b[^()]*\)\s*$",
+        "",
+        name,
+    ).strip()
     if not name or name.casefold() in {"серия", "цикл"}:
         return ""
     return name
@@ -1210,6 +1387,95 @@ def _series_hint_id(series_name: str, position: int, title: str) -> str:
     return "series-hint:" + hashlib.sha1(payload.encode("utf-8")).hexdigest()[:24]
 
 
+def _clean_series_entry_title(value: str, narrators: list[str]) -> str:
+    title = _clean(value)
+    title = re.split(
+        r"(?i)\s+(?:описание|доп\.?\s*информация)\s*[:：]",
+        title,
+        maxsplit=1,
+    )[0]
+    title = re.split(r"(?i)\s*//\s*автор\s*[:：]", title, maxsplit=1)[0]
+    title = re.split(r"(?i)\s*,?\s+в\s+исполнении\s+", title, maxsplit=1)[0]
+    title = re.sub(
+        r"(?i)\s*[-–—]?\s*(?:данн(?:ый|ая)\s+(?:релиз|раздача|аудиокнига|книга)|"
+        r"эта\s+раздача)\s*$",
+        "",
+        title,
+    )
+
+    # A linked series list may reproduce the complete RuTracker release title.
+    # Remove a confirmed current narrator only when it is followed by release
+    # metadata, never from an ordinary title occurrence.
+    for narrator in sorted(narrators, key=len, reverse=True):
+        if not narrator:
+            continue
+        title = re.sub(
+            rf"(?i)\s*[.,;\[]*\s*{re.escape(narrator)}\s*,?\s*"
+            rf"(?:\(\s*ЛИ\s*\)\s*,?\s*)?(?:19|20)\d{{2}}\s*\]?\s*$",
+            "",
+            title,
+        )
+    return _clean(title).rstrip(" ,;:/-–—")
+
+
+def _looks_like_non_series_entry(value: str) -> bool:
+    title = _clean(value)
+    if not title or len(title) > 240:
+        return True
+    if re.search(
+        r"(?i)(?:"
+        r"\.(?:mp3|m4[ab]|aac|ogg|opus|flac|wav|wma)\b|"
+        r"\b(?:bitrate|продолжительность)\b|"
+        r"\b\d{2,4}\s*(?:kbps|кбит|кб/с|kb/s)\b|"
+        r"[\[(]\d{1,3}:\d{2}(?::\d{2})?[\])]\s*$|"
+        r"^(?:\d{1,2}\.)?\d{1,2}\.\d{4}\s+.*"
+        r"(?:перезалит|добавлен|обновлен|обновлён|исправлен|заменен|заменён)"
+        r")",
+        title,
+    ):
+        return True
+    return False
+
+
+def _series_entries_look_like_contents(
+    entries: list[ParsedSeriesEntry], *, series_name: str, current_title: str,
+) -> bool:
+    if not entries:
+        return True
+    unlinked = [entry for entry in entries if not entry.external_url]
+    if len(unlinked) != len(entries):
+        return False
+    if len(entries) > 50:
+        return True
+    if len(entries) >= 10 and any(entry.position == 0 for entry in entries):
+        return True
+
+    # A heading equal to the current book, followed by unrelated numbered
+    # paragraphs, is a contents/lecture list rather than a list of books.
+    if _series_title_key(series_name) == _series_title_key(current_title):
+        current_key = _series_title_key(current_title)
+        related = any(
+            _series_title_key(entry.title) in current_key
+            or current_key in _series_title_key(entry.title)
+            for entry in entries
+        )
+        if not related:
+            return True
+
+    # Poetry compilations often number tracks and append the poet in brackets.
+    # A real series can contain an occasional parenthetical qualifier, so apply
+    # this only to a substantial, overwhelmingly credited unlinked list.
+    if len(entries) >= 6:
+        credited = 0
+        for entry in entries:
+            match = re.search(r"\(([^()]*)\)\s*$", entry.title)
+            if match and _looks_like_person_prefix(match.group(1)):
+                credited += 1
+        if credited / len(entries) >= 0.7:
+            return True
+    return False
+
+
 def _infer_series_position(title: str, body_title: str, series_name: str) -> int | None:
     for value in (title, body_title):
         text = _clean(value)
@@ -1235,10 +1501,46 @@ def _series_fragments(container) -> list[str]:
     return re.split(r"<br\s*/?>", container.decode_contents(), flags=re.I)
 
 
+def _parse_ordered_series_list(
+    container, *, topic_url: str, base_url: str, series_name: str,
+    current_position: int | None, authors: list[str], narrators: list[str],
+) -> list[ParsedSeriesEntry]:
+    """Parse a source-authored ``<ol>`` immediately following a series heading."""
+    current_topic = _topic_id(topic_url)
+    start = _int(container.get("start", "1")) or 1
+    entries: list[ParsedSeriesEntry] = []
+    for offset, item in enumerate(container.find_all("li", recursive=False)):
+        position = _int(item.get("value", "")) or start + offset
+        title = _clean_series_entry_title(_node_text(item), narrators)
+        if not title or _looks_like_non_series_entry(title):
+            continue
+        link = item.select_one('a[href*="viewtopic.php?t="]')
+        external_url = ""
+        external_id = ""
+        if link is not None:
+            external_url = urljoin(
+                base_url.rstrip("/") + "/forum/", link.get("href", "")
+            )
+            external_id = _topic_id(external_url)
+        if not external_id and current_position == position and current_topic:
+            external_url = topic_url
+            external_id = current_topic
+        if not external_id:
+            external_id = _series_hint_id(series_name, position, title)
+        entries.append(ParsedSeriesEntry(
+            external_id=external_id,
+            external_url=external_url,
+            title=title,
+            position=position,
+            authors=list(authors),
+        ))
+    return entries
+
+
 def _parse_series_lines(
     fragments: list[str], *, topic_url: str, base_url: str, series_name: str,
     current_position: int | None, current_title: str, authors: list[str],
-    require_heading: bool,
+    narrators: list[str], require_heading: bool,
 ) -> list[ParsedSeriesEntry]:
     current_topic = _topic_id(topic_url)
     entries: list[ParsedSeriesEntry] = []
@@ -1267,7 +1569,7 @@ def _parse_series_lines(
             if not re.search(r"(?:^|\s)\d{1,3}[.)]\s*", text):
                 continue
 
-        m = re.match(r"^(\d{1,3})[.)]\s*(.+)$", text)
+        m = re.match(r"^(?:[📘📗📙📕📚]\s*)?(\d{1,3})[.)]\s*(.+)$", text)
         if not m:
             if active and seen_numbered:
                 break
@@ -1275,8 +1577,8 @@ def _parse_series_lines(
 
         seen_numbered = True
         position = int(m.group(1))
-        title = _clean(re.sub(r"\s*[-–—]\s*данный релиз\s*$", "", m.group(2), flags=re.I))
-        if not title:
+        title = _clean_series_entry_title(m.group(2), narrators)
+        if not title or _looks_like_non_series_entry(title):
             continue
 
         link = frag.select_one('a[href*="viewtopic.php?t="]')
@@ -1308,12 +1610,33 @@ def _parse_series_lines(
 def _parse_topic_series(
     post, topic_url: str, base_url: str, series_name: str,
     current_position: int | None, current_title: str = "",
-    authors: list[str] | None = None,
+    authors: list[str] | None = None, narrators: list[str] | None = None,
 ) -> TopicSeries | None:
     if post is None or not series_name:
         return None
     current_topic = _topic_id(topic_url)
     all_entries: list[ParsedSeriesEntry] = []
+
+    for heading_node in post.select("span.post-b"):
+        heading_name = _series_heading_name(_node_text(heading_node))
+        if not heading_name or heading_name.casefold() != series_name.casefold():
+            continue
+        sibling = heading_node.next_sibling
+        while sibling is not None and not getattr(sibling, "name", None):
+            if _clean(str(sibling)):
+                break
+            sibling = sibling.next_sibling
+        if getattr(sibling, "name", None) != "ol":
+            continue
+        all_entries.extend(_parse_ordered_series_list(
+            sibling,
+            topic_url=topic_url,
+            base_url=base_url,
+            series_name=series_name,
+            current_position=current_position,
+            authors=list(authors or []),
+            narrators=list(narrators or []),
+        ))
 
     for wrap in post.select("div.sp-wrap"):
         head = wrap.select_one("div.sp-head")
@@ -1333,13 +1656,15 @@ def _parse_topic_series(
         all_entries.extend(_parse_series_lines(
             _series_fragments(body), topic_url=topic_url, base_url=base_url,
             series_name=series_name, current_position=current_position,
-            current_title=current_title, authors=list(authors or []), require_heading=False,
+            current_title=current_title, authors=list(authors or []),
+            narrators=list(narrators or []), require_heading=False,
         ))
 
     all_entries.extend(_parse_series_lines(
         _series_fragments(post), topic_url=topic_url, base_url=base_url,
         series_name=series_name, current_position=current_position,
-        current_title=current_title, authors=list(authors or []), require_heading=True,
+        current_title=current_title, authors=list(authors or []),
+        narrators=list(narrators or []), require_heading=True,
     ))
 
     if not all_entries:
@@ -1355,6 +1680,10 @@ def _parse_topic_series(
         ):
             deduped[key] = entry
     entries = sorted(deduped.values(), key=lambda x: (x.position, x.title.casefold()))
+    if _series_entries_look_like_contents(
+        entries, series_name=series_name, current_title=current_title,
+    ):
+        return None
 
     external_id = f"topic-series:{current_topic}" if current_topic else ""
     if not external_id:
@@ -1455,15 +1784,35 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
             continue
         genres.append(value)
 
+    # Some legacy subjects append the genre in square brackets while the
+    # post exposes the same value in a dedicated field. It is navigation
+    # metadata, not part of the work title (topic 2332733).
+    genre_suffix = re.search(r"\s*\[([^\[\]]+)\]\s*$", title)
+    if genre_suffix:
+        suffix_value = _clean(genre_suffix.group(1)).casefold()
+        if any(suffix_value == genre.casefold() for genre in genres):
+            title = _clean(title[:genre_suffix.start()]).rstrip(" ,;:/-–—")
+
     description = _description_from_post(post) or _label_value(post_text, ("Описание",))
     if not description and post:
         description = _clean(post.get_text(" ", strip=True))[:5000]
 
     cover_url = _cover_from_post(post, base_url)
-    duration = _duration_seconds(
-        _post_field(post, ("Время звучания", "Продолжительность"))
-        or _label_value(post_text, ("Время звучания", "Продолжительность"))
+    duration_labels = (
+        "Время звучания",
+        "Общее время звучания",
+        "Общее звучание",
+        "Продолжительность",
     )
+    duration = _duration_seconds(
+        _post_field(post, duration_labels)
+        or _label_value(post_text, duration_labels)
+    )
+    if not duration:
+        duration = _duration_from_extra_info(
+            _post_field(post, ("Доп. информация", "Дополнительная информация"))
+            or _label_value(post_text, ("Доп. информация", "Дополнительная информация"))
+        )
     inferred_series_name = _infer_topic_series_name(post)
     series_name = _normalize_series_name(
         _post_field(post, series_labels)
@@ -1482,7 +1831,7 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
     series_position = _int(position_raw) or _infer_series_position(title, body_title, series_name)
     topic_series = _parse_topic_series(
         post, topic_url, base_url, series_name, series_position,
-        current_title=title, authors=authors,
+        current_title=title, authors=authors, narrators=narrators,
     )
 
     # Fallback extraction can populate people after the source-field presence
