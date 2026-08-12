@@ -63,5 +63,5 @@ def test_audiobook_word_inside_real_title_is_preserved():
 '''
 if "test_release_type_audiobook_prefix_is_removed_only_at_title_start" in text:
     raise SystemExit("tests already present")
-TEST.write_text(text.rstrip() + block + "\n", encoding="utf-8")
+TEST.write_text(text.rstrip() + block.rstrip() + "\n", encoding="utf-8")
 print("added RuTracker audiobook prefix regression tests")
