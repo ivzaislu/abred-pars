@@ -761,7 +761,7 @@ def _infer_narrators_from_subject(raw_topic_title: str) -> list[str]:
 
 _CATALOG_TITLE_TECH_RE = re.compile(
     r"(?i)(?:"
-    r"\b(?:аудиокнига|audio\s*book|mp3pro|mp3|мр3|m4a|m4b|aac|ogg|opus|flac|wav|wma)\b|"
+    r"\b(?:mp3pro|mp3|мр3|m4a|m4b|aac|ogg|opus|flac|wav|wma)\b|"
     r"\brip\s+\d{2,4}\s*(?:kbps|kbit/s|kb/s|кбит/с|кб/с)?\b|"
     r"\b\d{2,4}\s*(?:kbps|kbit/s|kb/s|кбит/с|кб/с)\b"
     r")"
@@ -777,8 +777,30 @@ def _clean_catalog_title_candidate(value: str, authors: list[str]) -> str:
     text = normalize_topic_subject_title(value, authors) if value else ""
     if not text:
         return ""
+
+    # Legacy RuTracker topics often use "Аудиокнига" as a release-type
+    # prefix rather than as part of the literary title. Strip it only at the
+    # beginning of the normalized candidate, optionally after a stray dash.
+    text = re.sub(
+        r"(?i)^(?:[-–—]\s*)?(?:аудиокнига|audio\s*book)"
+        r"(?:\s*[:：.]\s*|\s+(?=[«\"“]))",
+        "",
+        text,
+        count=1,
+    ).strip()
     text = re.sub(r"(?i)\s+[-–—]\s*CD\s+к\s+книге\s*$", "", text).strip()
+
+    # Parenthesized release type remains a safe boundary. In the middle of a
+    # genuine title, however, the word "аудиокнига" is not technical by
+    # itself. Treat it as a boundary only when an actual codec/rip marker
+    # immediately follows (e.g. "аудиокнига MP3").
     marker = re.search(r"(?i)\s*\(\s*(?:аудиокнига|audio\s*book)\s*\)", text)
+    if not marker:
+        marker = re.search(
+            r"(?i)\s+(?:аудиокнига|audio\s*book)\s+"
+            r"(?=(?:mp3pro|mp3|мр3|m4a|m4b|aac|ogg|opus|flac|wav|wma|rip\b))",
+            text,
+        )
     if marker and marker.start() >= 3:
         text = text[:marker.start()]
     else:
@@ -817,7 +839,21 @@ def _select_topic_title(raw_topic_title: str, body_title: str, authors: list[str
         body_key, _ = _alnum_compact(body)
         equivalent = bool(subject_key and body_key and subject_key == body_key)
         related = not subject or _body_title_related_to_subject(body, subject)
-        if related and (not subject or equivalent or _subject_still_looks_dirty(subject)):
+        people_suffix = False
+        if subject and body and subject.casefold().startswith(body.casefold()):
+            suffix = _clean(subject[len(body):])
+            match = re.fullmatch(r"\((.+)\)", suffix)
+            if match and authors:
+                inside = _clean(match.group(1))
+                people_suffix = (
+                    "/" in inside
+                    and any(
+                        _same_person(part, author) or _author_prefix_matches(part, [author])
+                        for part in (_clean(x) for x in inside.split("/"))
+                        for author in authors
+                    )
+                )
+        if related and (not subject or equivalent or people_suffix or _subject_still_looks_dirty(subject)):
             return body
     if subject:
         return _heal_subject_soft_breaks(subject, body)
