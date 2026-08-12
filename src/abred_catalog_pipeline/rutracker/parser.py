@@ -307,6 +307,12 @@ def _topic_narrators(value: str, authors: list[str]) -> list[str]:
 
     # Narrator fields sometimes describe the action instead of containing only
     # a display name. Keep the person and discard the prose/music credit.
+    raw = re.sub(
+        r"(?i)^(?:(?:заслуженн(?:ый|ая)|народн(?:ый|ая))\s+"
+        r"артист(?:ка)?(?:\s+(?:РФ|России|СССР))?)\s*[,;:—–-]\s*",
+        "",
+        raw,
+    )
     raw = re.sub(r"(?i)^коран\s+читает\s+", "", raw)
     raw = re.sub(r"(?i)^читает\s+и\s+по[её]т\s+", "", raw)
     raw = re.sub(r"(?i)^читает\s+", "", raw)
@@ -316,16 +322,15 @@ def _topic_narrators(value: str, authors: list[str]) -> list[str]:
 
 
 def _post_cast_narrators(post) -> list[str]:
-    """Extract people from a role list following a standalone `Исполнители:`."""
+    """Extract people from a standalone `Исполнители:` or `В ролях:` list."""
     if post is None:
         return []
     lines = [_clean(x) for x in post.get_text("\n", strip=True).splitlines()]
-    start = next(
-        (i for i, line in enumerate(lines) if _normalized_post_label(line) == "исполнители"),
-        None,
-    )
+    starts = {"исполнители", "в ролях"}
+    start = next((i for i, line in enumerate(lines) if _normalized_post_label(line) in starts), None)
     if start is None:
         return []
+    direct_people_list = _normalized_post_label(lines[start]) == "в ролях"
     out: list[str] = []
     for line in lines[start + 1:]:
         folded = _normalized_post_label(line)
@@ -334,9 +339,11 @@ def _post_cast_narrators(post) -> list[str]:
         if re.match(r"(?i)^(?:в эпизодах|музыка\b|оркестр\b)", line):
             continue
         match = re.match(r"^.+?\s+[-–—]\s+(.+)$", line)
+        people_value = match.group(1) if match else (line if direct_people_list else "")
+        people = _split_people(people_value)
         if not match:
-            continue
-        for person in _split_people(match.group(1)):
+            people = [person for person in people if _looks_like_person_prefix(person)]
+        for person in people:
             if person not in out:
                 out.append(person)
     return out
@@ -534,7 +541,17 @@ def _strip_release_suffix(raw_topic_title: str) -> tuple[str, bool]:
         if not match:
             break
         content = _clean(match.group(1))
-        if not removed_release_group and not _RELEASE_META_RE.search(content):
+        people = _split_people(content)
+        people_release_group = bool(
+            re.search(r"[,;/]", content)
+            and len(people) >= 2
+            and all(_looks_like_person_prefix(person) for person in people)
+        )
+        if (
+            not removed_release_group
+            and not _RELEASE_META_RE.search(content)
+            and not people_release_group
+        ):
             break
         value = _clean(value[:match.start()])
         removed_release_group = True
@@ -620,7 +637,10 @@ def normalize_topic_subject_title(raw_topic_title: str, authors: list[str]) -> s
             if quote:
                 left = _clean(quote.group(1))
                 right = _clean(quote.group(2)).strip('«»"“” ')
-                if right and (
+                # This branch repairs genuinely unclosed legacy title quotes.
+                # A closing quote followed by a subtitle is an internal quote,
+                # not a delimiter between the author and the full title.
+                if right and not re.search(r'[»"”]', quote.group(2)) and (
                     any(_same_person(left, author) for author in authors)
                     or _author_prefix_matches(left, authors)
                 ):
@@ -629,7 +649,10 @@ def normalize_topic_subject_title(raw_topic_title: str, authors: list[str]) -> s
         if not handled_quote:
             for dot in re.finditer(r"\.\s+", value):
                 left = _clean(value[:dot.start() + 1])
-                right = _clean(value[dot.end():]).strip('«»"“” ')
+                # Only the author separator is removed here. Stripping quote
+                # characters from both ends also removed a legitimate final
+                # quote from titles such as the old Shrimad Bhagavatam topics.
+                right = _clean(value[dot.end():])
                 if not right:
                     continue
                 if (
@@ -887,6 +910,10 @@ def _clean_catalog_title_candidate(value: str, authors: list[str]) -> str:
     if not text:
         return ""
 
+    # A broken upstream page once leaked the HTTP status text into the topic
+    # title between the author and the actual work name.
+    text = re.sub(r"(?i)^bad[ _-]*gateway\s*[-–—:]\s*", "", text, count=1)
+
     # Legacy RuTracker topics often use "Аудиокнига" as a release-type
     # prefix rather than as part of the literary title. Strip it only at the
     # beginning of the normalized candidate, optionally after a stray dash.
@@ -916,13 +943,26 @@ def _clean_catalog_title_candidate(value: str, authors: list[str]) -> str:
         marker = _CATALOG_TITLE_TECH_RE.search(text)
         if marker and marker.start() >= 3:
             text = text[:marker.start()]
+    # Cutting at a codec inside `[MP3]` can leave the opening bracket behind.
+    text = re.sub(r"\s*\[\s*$", "", text)
     text = _clean(text).rstrip(" ,;:/-–—")
+    # Some Quran topics append a Latin transliteration of the reciter after a
+    # slash while the actual narrator is supplied in its own metadata field.
+    text = re.sub(
+        r"(?i)^(.+\b(?:коран|qur(?:['’])?an))\s*/\s*"
+        r"[A-Z][A-Za-z ._'’\-]{2,80}$",
+        r"\1",
+        text,
+    )
     quoted = re.match(r'^[«"“](.+?)[»"”]\s+(.+)$', text)
     if quoted and authors:
         quoted_title = _clean(quoted.group(1))
         possible_author = _clean(quoted.group(2))
         if any(_same_person(possible_author, author) for author in authors) or _author_prefix_matches(possible_author, authors):
             text = quoted_title
+    text = re.sub(r"\s+([)\]»”])", r"\1", text)
+    text = re.sub(r"([(\[«“])\s+", r"\1", text)
+    text = re.sub(r"(?<=[А-Яа-яЁё])\.(?=[А-ЯЁ][а-яё])", ". ", text)
     text = _clean(text).strip()
     if len(text) >= 2 and (text[0], text[-1]) in {("\"", "\""), ("«", "»"), ("“", "”")}:
         text = _clean(text[1:-1])
@@ -1037,8 +1077,15 @@ def _topic_authors(post, post_text: str) -> list[str]:
     if not given and not _post_field_present(post, post_text, given_labels):
         given = _label_value(post_text, given_labels)
     if surname or given:
+        # Several legacy templates accidentally put a translator credit into
+        # the given-name field. It must not be joined to the real surname field.
+        if re.match(r"(?i)^перевод(?:чик|чики)?\b|^перевод\s+на\b", given):
+            given = ""
         surnames = _split_people(surname)
         given_names = _split_people(given)
+        if len(surnames) == len(given_names) == 1 and _same_person(surnames[0], given_names[0]):
+            value = _normalize_author_item(surnames[0])
+            return [value] if value else []
         if len(surnames) == len(given_names) and len(surnames) > 1:
             return [
                 family_name if _same_person(family_name, given_name)
@@ -1061,6 +1108,29 @@ def _title_narrator(value: str) -> tuple[str, list[str]]:
         return text, []
     clean_title = _clean(text[:match.start()]).rstrip(" .!?,;:/-–—")
     return clean_title, [person]
+
+
+def _sermon_speaker_from_title(value: str, context: str = "") -> str:
+    """Return the explicitly named pastor from a narrow sermon-title pattern."""
+    text, _ = _strip_release_suffix(value)
+    match = re.fullmatch(r"(?i)аудиопроповеди\s+пастора\s+(.+)", text)
+    if not match:
+        return ""
+    person = _normalize_person_item(match.group(1))
+    if not _looks_like_person_prefix(person):
+        return ""
+    # The heading uses the genitive case; the biography on this legacy page
+    # provides the canonical nominative display name.
+    biography = re.search(
+        r"(?i:краткая\s+биография)\s*:\s*"
+        r"([А-ЯЁ][А-Яа-яЁё'-]+(?:\s+[А-ЯЁ][А-Яа-яЁё'-]+){1,3})",
+        context,
+    )
+    if biography:
+        candidate = _clean(biography.group(1))
+        if _looks_like_person_prefix(candidate):
+            return candidate
+    return person
 
 
 def _cover_from_post(post, base_url: str) -> str:
@@ -1333,6 +1403,10 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
         or _label_value(post_text, ("Название", "Наименование", "Название книги", "Название произведения"))
         or _topic_display_title(post, raw_topic_title, authors)
     )
+    sermon_speaker = (
+        _sermon_speaker_from_title(raw_topic_title, post_text)
+        or _sermon_speaker_from_title(body_title, post_text)
+    )
     if not authors:
         inferred_author = _infer_author_from_subject(raw_topic_title, body_title)
         if inferred_author:
@@ -1341,6 +1415,8 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
                 x for x in (_normalize_author_item(v) for v in _split_people(inferred_author))
                 if x
             ]
+        elif sermon_speaker:
+            authors = [sermon_speaker]
 
     title = _select_topic_title(raw_topic_title, body_title, authors) or f"RuTracker {topic_id}"
     narrators = _topic_narrators(
@@ -1350,6 +1426,8 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
     )
     if not narrators:
         narrators = _post_cast_narrators(post) or _infer_narrators_from_subject(raw_topic_title)
+    if not narrators and sermon_speaker:
+        narrators = [sermon_speaker]
     title, explicit_title_narrators = _title_narrator(title)
     if explicit_title_narrators:
         for person in explicit_title_narrators:
@@ -1426,12 +1504,17 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
     download_links = soup.select('a.dl-stub[href*="dl.php?t="], a[href*="dl.php?t="]')
     dl_link = next(
         (link for link in download_links if _topic_id(link.get("href", "")) == topic_id),
-        download_links[0] if download_links else None,
+        None,
     )
     if dl_link:
         torrent_url = urljoin(base_url.rstrip("/") + "/forum/", dl_link.get("href", ""))
     elif topic_id:
         torrent_url = f"{base_url.rstrip('/')}/forum/dl.php?t={topic_id}"
+    elif download_links:
+        torrent_url = urljoin(
+            base_url.rstrip("/") + "/forum/",
+            download_links[0].get("href", ""),
+        )
 
     return ParsedBook(
         external_id=topic_id or topic_url,
