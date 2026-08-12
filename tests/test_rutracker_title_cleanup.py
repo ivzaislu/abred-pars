@@ -1,4 +1,4 @@
-from abred_catalog_pipeline.rutracker.parser import _select_topic_title
+from abred_catalog_pipeline.rutracker.parser import _select_topic_title, parse_topic_html
 
 
 def test_legacy_release_metadata_prefers_clean_body_title():
@@ -122,3 +122,53 @@ def test_audiobook_word_inside_real_title_is_preserved():
         "Как создавалась аудиокнига: дневник студии",
         [],
     ) == "Как создавалась аудиокнига: дневник студии"
+
+
+def _topic_html(title: str, author: str, narrator: str, body_title: str) -> str:
+    return f'''<html><body>
+    <h1 class="maintitle"><a id="topic-title">{title}</a></h1>
+    <div class="post_body">
+      <span style="font-size: 24px">{body_title}</span><br>
+      <span class="post-b">Автор</span>: {author}<br>
+      <span class="post-b">Исполнитель</span>: {narrator}<br>
+      <span class="post-b">Жанр</span>: аудиозапись семинара<br>
+    </div>
+    </body></html>'''
+
+
+def test_confirmed_narrator_suffix_is_removed_from_real_legacy_shape():
+    cases = [
+        (
+            "Гинзбург М.Р. - Эриксоновский гипноз ступень № 4 [Гинзбург М.Р.]",
+            "Гинзбург М.Р.",
+            "Гинзбург М.Р.",
+            "Эрикссоновский гипноз ступень № 4",
+            "Эриксоновский гипноз ступень № 4",
+        ),
+        (
+            "М.Р.Гинзбург - Эриксоновский гипноз : ступень № 6 [М.Р.Гинзбург]",
+            "М.Р.Гинзбург",
+            "М.Р.Гинзбург",
+            "Эриксоновский гипноз : ступень № 6",
+            "Эриксоновский гипноз : ступень № 6",
+        ),
+    ]
+    for subject, author, narrator, body_title, expected in cases:
+        book = parse_topic_html(
+            _topic_html(subject, author, narrator, body_title),
+            "https://rutracker.org/forum/viewtopic.php?t=1",
+            "https://rutracker.org",
+        )
+        assert book.title == expected
+        assert book.authors == [author]
+        assert book.narrators == [narrator]
+
+
+def test_unrelated_bracketed_qualifier_is_preserved():
+    subject = "Абдерауф Даккак - Коранические рассказы для детей [Коран]"
+    book = parse_topic_html(
+        _topic_html(subject, "Абдерауф Даккак", "Другой Исполнитель", "Коранические рассказы для детей [Коран]"),
+        "https://rutracker.org/forum/viewtopic.php?t=870349",
+        "https://rutracker.org",
+    )
+    assert book.title == "Коранические рассказы для детей [Коран]"

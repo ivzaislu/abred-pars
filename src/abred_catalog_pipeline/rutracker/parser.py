@@ -1179,6 +1179,15 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
     )
     if not narrators:
         narrators = _infer_narrators_from_subject(raw_topic_title)
+
+    # Some legacy subjects duplicate a confirmed narrator in a final [Name]
+    # suffix. Remove only that exact people suffix after narrator metadata has
+    # been parsed; unrelated bracketed title/series qualifiers stay intact.
+    suffix = re.search(r"\s*\[([^\[\]]+)\]\s*$", title)
+    if suffix and narrators:
+        person = _clean(suffix.group(1))
+        if any(_same_person(person, narrator) for narrator in narrators):
+            title = _clean(title[:suffix.start()]).rstrip(" ,;:/-–—")
     genre_value = _post_field(post, genre_labels) or _label_value(post_text, genre_labels)
     raw_genres = [_clean(x) for x in re.split(r"\s*[,;/]\s*", genre_value) if _clean(x)] if genre_value else []
     series_genre_hint = ""
