@@ -281,6 +281,14 @@ def _split_people(value: str) -> list[str]:
     return out
 
 
+def _normalize_author_item(value: str) -> str:
+    item = _normalize_person_item(value)
+    # Some old templates put the literal label into the value itself.
+    # Restrict removal to a leading label followed by a capitalized name so
+    # values such as "автор неизвестен" and "Анонимный автор" stay intact.
+    return re.sub(r"^[Аа]втор\s+(?=[A-ZА-ЯЁ])", "", item).strip()
+
+
 def _topic_narrators(value: str, authors: list[str]) -> list[str]:
     raw = _clean(value)
     if not raw:
@@ -288,6 +296,14 @@ def _topic_narrators(value: str, authors: list[str]) -> list[str]:
     marker = re.sub(r"(?i)\s*\(\s*ЛИ\s*\)\s*$", "", raw).strip().casefold()
     if marker in {"автор", "читает автор", "чтец автор", "исполняет автор"}:
         return list(authors)
+    if marker in {
+        "заслуженные и народные артисты россии",
+        "разные исполнители",
+        "участники конкурса",
+    }:
+        return [re.sub(r"(?i)\s*\(\s*ЛИ\s*\)\s*$", "", raw).strip()]
+    if re.match(r"(?i)^радиопостановка\b", raw):
+        return []
 
     # Narrator fields sometimes describe the action instead of containing only
     # a display name. Keep the person and discard the prose/music credit.
@@ -297,6 +313,33 @@ def _topic_narrators(value: str, authors: list[str]) -> list[str]:
     raw = re.split(r"(?i)\.\s*музыка\b", raw, maxsplit=1)[0]
     raw = re.split(r"(?i)\s+-\s+(?:читает|исполняет|передразнивает)\b", raw, maxsplit=1)[0]
     return _split_people(raw)
+
+
+def _post_cast_narrators(post) -> list[str]:
+    """Extract people from a role list following a standalone `Исполнители:`."""
+    if post is None:
+        return []
+    lines = [_clean(x) for x in post.get_text("\n", strip=True).splitlines()]
+    start = next(
+        (i for i, line in enumerate(lines) if _normalized_post_label(line) == "исполнители"),
+        None,
+    )
+    if start is None:
+        return []
+    out: list[str] = []
+    for line in lines[start + 1:]:
+        folded = _normalized_post_label(line)
+        if folded in _KNOWN_POST_LABELS:
+            break
+        if re.match(r"(?i)^(?:в эпизодах|музыка\b|оркестр\b)", line):
+            continue
+        match = re.match(r"^.+?\s+[-–—]\s+(.+)$", line)
+        if not match:
+            continue
+        for person in _split_people(match.group(1)):
+            if person not in out:
+                out.append(person)
+    return out
 
 
 def _post_field(post, labels: tuple[str, ...]) -> str:
@@ -312,7 +355,7 @@ def _post_field(post, labels: tuple[str, ...]) -> str:
         while node is not None:
             name = getattr(node, "name", None)
             classes = set(getattr(node, "get", lambda *_: [])("class") or []) if name else set()
-            if name in {"br", "hr"}:
+            if name in {"br", "hr"} or (name == "span" and "post-br" in classes):
                 break
             if name == "span" and "post-b" in classes:
                 nested_text = _node_text(node)
@@ -555,16 +598,35 @@ def normalize_topic_subject_title(raw_topic_title: str, authors: list[str]) -> s
             break
 
     if authors:
-        quote = re.match(r'^(.{2,100}?)\s*[«"“](.+)$', value)
-        if quote:
-            left = _clean(quote.group(1))
-            right = _clean(quote.group(2)).strip('«»"“” ')
+        handled_quote = False
+        closed_quote = re.match(
+            r'^(.{2,100}?)\s*[«"“](.+?)[»"”](\s*(?:(?:cd|диск)\s*\d+))?$',
+            value,
+            flags=re.I,
+        )
+        if closed_quote:
+            left = _clean(closed_quote.group(1))
+            right = _clean(
+                f"{closed_quote.group(2)} {closed_quote.group(3) or ''}"
+            )
             if right and (
                 any(_same_person(left, author) for author in authors)
                 or _author_prefix_matches(left, authors)
             ):
                 value = right
-        else:
+                handled_quote = True
+        if not handled_quote:
+            quote = re.match(r'^(.{2,100}?)\s*[«"“](.+)$', value)
+            if quote:
+                left = _clean(quote.group(1))
+                right = _clean(quote.group(2)).strip('«»"“” ')
+                if right and (
+                    any(_same_person(left, author) for author in authors)
+                    or _author_prefix_matches(left, authors)
+                ):
+                    value = right
+                    handled_quote = True
+        if not handled_quote:
             for dot in re.finditer(r"\.\s+", value):
                 left = _clean(value[:dot.start() + 1])
                 right = _clean(value[dot.end():]).strip('«»"“” ')
@@ -864,6 +926,8 @@ def _clean_catalog_title_candidate(value: str, authors: list[str]) -> str:
     text = _clean(text).strip()
     if len(text) >= 2 and (text[0], text[-1]) in {("\"", "\""), ("«", "»"), ("“", "”")}:
         text = _clean(text[1:-1])
+    if text.count("«") == text.count("»") + 1:
+        text += "»"
     return text
 
 
@@ -961,7 +1025,7 @@ def _topic_authors(post, post_text: str) -> list[str]:
     )
     direct = _post_field(post, direct_labels) or _label_value(post_text, direct_labels)
     if direct:
-        return _split_people(direct)
+        return [x for x in (_normalize_author_item(v) for v in _split_people(direct)) if x]
     surname_labels = ("Фамилия автора", "Фамилии автора")
     given_labels = ("Имя автора", "Имена автора")
     surname = _post_field(post, surname_labels)
@@ -976,8 +1040,12 @@ def _topic_authors(post, post_text: str) -> list[str]:
         surnames = _split_people(surname)
         given_names = _split_people(given)
         if len(surnames) == len(given_names) and len(surnames) > 1:
-            return [_clean(f"{given_name} {family_name}") for family_name, given_name in zip(surnames, given_names)]
-        value = _normalize_person_item(_clean(f"{surname} {given}"))
+            return [
+                family_name if _same_person(family_name, given_name)
+                else _clean(f"{given_name} {family_name}")
+                for family_name, given_name in zip(surnames, given_names)
+            ]
+        value = _normalize_author_item(_clean(f"{surname} {given}"))
         return [value] if value else []
     return []
 
@@ -1010,7 +1078,8 @@ def _cover_from_post(post, base_url: str) -> str:
 
 
 _SERIES_HEADING_RE = re.compile(
-    r'(?i)^(?:серия|цикл|книги\s+цикла|книги\s+серии)\s*(?:[:：\-]\s*)?[«"“]?(.+?)[»"”]?$'
+    r'(?i)^(?:цикл\s*/\s*серия|серия|цикл|книги\s+цикла|книги\s+серии)'
+    r'\s*(?:[:：\-]\s*)?(.+?)$'
 )
 
 
@@ -1021,17 +1090,40 @@ def _series_heading_name(value: str) -> str:
     m = _SERIES_HEADING_RE.match(text)
     if not m:
         return ""
-    name = _clean(m.group(1)).strip('«»"“” \t')
+    raw_name = _clean(m.group(1))
+    quoted = re.search(r'[«"“](.+?)[»"”]', raw_name)
+    name = _clean(quoted.group(1) if quoted else raw_name).strip('«»"“” \t')
     if not name or name.casefold() in {"серия", "цикл"}:
         return ""
     return name
 
 
+def _normalize_series_name(value: str) -> str:
+    text = _clean(value).strip(" -:：")
+    text = re.sub(
+        r"(?i)^/?(?:цикл\s*/\s*серия|серия|цикл)\s*(?:[:：\-]\s*)?",
+        "",
+        text,
+        count=1,
+    )
+    quoted = re.fullmatch(r'[«"“](.+?)[»"”]', text)
+    return _clean(quoted.group(1) if quoted else text)
+
+
 def _infer_topic_series_name(post) -> str:
     if post is None:
         return ""
-    for node in post.select("div.sp-head, a.postLink, span.post-b"):
+    for node in post.select("div.sp-head, span.post-b"):
+        if node.name == "span" and node.find_parent("a", class_="postLink") is not None:
+            continue
         name = _series_heading_name(_node_text(node))
+        if name:
+            return name
+    for node in post.select("a.postLink"):
+        text = _node_text(node)
+        if not re.match(r"(?i)^(?:цикл\s*/\s*серия|серия\s*[:：])", text):
+            continue
+        name = _series_heading_name(text)
         if name:
             return name
     return ""
@@ -1245,7 +1337,10 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
         inferred_author = _infer_author_from_subject(raw_topic_title, body_title)
         if inferred_author:
             # Important fix: inferred legacy subject can contain multiple people.
-            authors = _split_people(inferred_author)
+            authors = [
+                x for x in (_normalize_author_item(v) for v in _split_people(inferred_author))
+                if x
+            ]
 
     title = _select_topic_title(raw_topic_title, body_title, authors) or f"RuTracker {topic_id}"
     narrators = _topic_narrators(
@@ -1254,7 +1349,7 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
         authors,
     )
     if not narrators:
-        narrators = _infer_narrators_from_subject(raw_topic_title)
+        narrators = _post_cast_narrators(post) or _infer_narrators_from_subject(raw_topic_title)
     title, explicit_title_narrators = _title_narrator(title)
     if explicit_title_narrators:
         for person in explicit_title_narrators:
@@ -1292,7 +1387,7 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
         or _label_value(post_text, ("Время звучания", "Продолжительность"))
     )
     inferred_series_name = _infer_topic_series_name(post)
-    series_name = _clean(
+    series_name = _normalize_series_name(
         _post_field(post, series_labels)
         or _label_value(post_text, series_labels)
         or inferred_series_name
@@ -1328,7 +1423,11 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
         magnet = magnet_link.get("href", "")
 
     torrent_url = ""
-    dl_link = soup.select_one('a.dl-stub[href*="dl.php?t="], a[href*="dl.php?t="]')
+    download_links = soup.select('a.dl-stub[href*="dl.php?t="], a[href*="dl.php?t="]')
+    dl_link = next(
+        (link for link in download_links if _topic_id(link.get("href", "")) == topic_id),
+        download_links[0] if download_links else None,
+    )
     if dl_link:
         torrent_url = urljoin(base_url.rstrip("/") + "/forum/", dl_link.get("href", ""))
     elif topic_id:
