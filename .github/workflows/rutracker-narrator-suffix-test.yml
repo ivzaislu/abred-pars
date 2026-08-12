@@ -1,0 +1,33 @@
+name: RuTracker confirmed narrator suffix test
+on:
+  push:
+    branches: [assistant/rutracker-narrator-suffix]
+permissions:
+  contents: write
+jobs:
+  test-and-materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: assistant/rutracker-narrator-suffix
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python tools/apply_rutracker_narrator_suffix.py
+      - run: python -m pip install -e '.[test]'
+      - run: python -m py_compile src/abred_catalog_pipeline/rutracker/parser.py tests/test_rutracker_title_cleanup.py
+      - run: pytest -q
+      - name: Materialize tested changes
+        if: success()
+        run: |
+          rm -rf src/abred_catalog_pipeline.egg-info
+          rm tools/apply_rutracker_narrator_suffix.py
+          rm .github/workflows/rutracker-narrator-suffix-test.yml
+          git config user.name 'abred-catalog-bot'
+          git config user.email 'abred-catalog-bot@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix: strip confirmed RuTracker narrator suffixes'
+          git push origin HEAD:assistant/rutracker-narrator-suffix
