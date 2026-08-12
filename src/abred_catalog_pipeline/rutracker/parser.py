@@ -285,6 +285,9 @@ _STANDALONE_PEOPLE_NOISE = {
     "др", "др.", "другие",
     # Service marker seen in RuTracker narrator metadata, not a person.
     "ли", "подробности далее",
+    # A profession-only fragment from a comma-separated author field.  The
+    # actual person's name is supplied by the following fragment.
+    "ученый каббалист", "учёный каббалист",
 }
 
 
@@ -294,6 +297,8 @@ def _normalize_person_item(value: str) -> str:
         return ""
 
     marker = item.strip("()[]{}<>«»\"' .,:;").casefold()
+    if not marker or re.fullmatch(r"[-–—_]+", marker):
+        return ""
     if marker in _STANDALONE_PEOPLE_NOISE:
         return ""
 
@@ -392,7 +397,18 @@ def _normalize_author_item(value: str) -> str:
     # Some old templates put the literal label into the value itself.
     # Restrict removal to a leading label followed by a capitalized name so
     # values such as "автор неизвестен" and "Анонимный автор" stay intact.
+    item = re.sub(
+        r"^(?i:автор\s+(?:стихов\s+и\s+текста\s*[-–—:]*\s*))"
+        r"(?=[A-ZА-ЯЁ])",
+        "",
+        item,
+    ).strip()
     item = re.sub(r"^[Аа]втор\s+(?=[A-ZА-ЯЁ])", "", item).strip()
+    item = re.sub(
+        r"^(?i:профессор|академик)\s+(?=[A-ZА-ЯЁ])",
+        "",
+        item,
+    ).strip()
     # Keep contribution roles out of the person display name. The role itself
     # cannot currently be represented by the feed schema.
     item = re.sub(
@@ -433,6 +449,7 @@ def _normalize_narrator_item(value: str) -> str:
         item,
     )
     item = re.sub(r"(?i)^от\s+автора\s*[-–—:：]\s*", "", item)
+    item = re.sub(r"^[-–—:：]+\s*", "", item)
 
     # Cast lists commonly use ``Role — Person``. Select the final segment only
     # when it independently looks like a person, so hyphenated names survive.
@@ -476,6 +493,26 @@ def _topic_narrators(value: str, authors: list[str]) -> list[str]:
     raw = re.sub(r"(?i)^читает\s+", "", raw)
     raw = re.split(r"(?i)\.\s*музыка\b", raw, maxsplit=1)[0]
     raw = re.split(r"(?i)\s+-\s+(?:читает|исполняет|передразнивает)\b", raw, maxsplit=1)[0]
+
+    # A few children's releases use a complete comma-separated cast in the
+    # compact form ``Character-Person``.  Transform it only when at least two
+    # credits share that exact shape; this avoids splitting an ordinary
+    # hyphenated personal name.
+    compact_items = _split_people_top_level(raw)
+    compact_people: list[str] = []
+    for compact_item in compact_items:
+        match = re.match(
+            r"^(.+\s.+?)-([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.'’]+"
+            r"(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё.'’]+){1,3})$",
+            compact_item,
+        )
+        if not match or not _looks_like_person_prefix(match.group(2)):
+            compact_people = []
+            break
+        compact_people.append(match.group(2))
+    if len(compact_people) >= 2:
+        raw = ", ".join(compact_people)
+
     out: list[str] = []
     for value in _split_people(raw):
         item = _normalize_narrator_item(value)
@@ -485,12 +522,37 @@ def _topic_narrators(value: str, authors: list[str]) -> list[str]:
     return out
 
 
+def _joint_author_performers(post_text: str) -> list[str]:
+    """Extract named readers from an explicit joint creator/performer block."""
+    section = re.search(
+        r"(?is)(?:^|\n)\s*автор\s+и\s+исполнитель\s*"
+        r"(?:\n\s*)?[:：]\s*(.+?)(?=\n\s*жанр\s*(?:\n\s*)?[:：])",
+        post_text,
+    )
+    if not section:
+        return []
+    out: list[str] = []
+    for match in re.finditer(r"(?im)\bчитает\s+([^\n]+)", section.group(1)):
+        person = _normalize_author_item(match.group(1))
+        if (
+            person
+            and not any(ch.isdigit() for ch in person)
+            and not _RELEASE_META_RE.search(person)
+            and person not in out
+        ):
+            out.append(person)
+    return out
+
+
 def _post_cast_narrators(post) -> list[str]:
     """Extract people from a standalone `Исполнители:` or `В ролях:` list."""
     if post is None:
         return []
     lines = [_clean(x) for x in post.get_text("\n", strip=True).splitlines()]
-    starts = {"исполнители", "в ролях"}
+    starts = {
+        "исполнители", "в ролях",
+        "действующие лица и исполнители",
+    }
     start = next((i for i, line in enumerate(lines) if _normalized_post_label(line) in starts), None)
     if start is None:
         return []
@@ -762,6 +824,26 @@ _GENERIC_SUBJECT_PREFIX_RE = re.compile(
     r"(?i)^(?:сборники?|аудиокниги?|радиоспектакли?)\s*[-–—:]\s+"
 )
 
+_ANONYMOUS_AUTHOR_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:имя\s+автора\s+не\s+раскрывается|"
+    r"автор\s+(?:неизвестен|не\s+указан))\b"
+)
+
+
+def _strip_anonymous_release_prefix(value: str) -> str:
+    """Drop a brand/surname prefix before an explicit audiobook marker.
+
+    This is used only when the post itself says that the real author is not
+    disclosed.  It therefore cleans the catalog title without inventing the
+    visible prefix as an author.
+    """
+    return _clean(re.sub(
+        r"(?i)^.{2,80}?\s+[-–—]\s+(?=(?:аудиокнига|audio\s*book)\s+[«\"“])",
+        "",
+        value,
+        count=1,
+    ))
+
 
 def normalize_topic_subject_title(raw_topic_title: str, authors: list[str]) -> str:
     value, _ = _strip_release_suffix(raw_topic_title)
@@ -846,7 +928,8 @@ _KNOWN_POST_LABELS = {
     "автор (никнейм)", "фамилия имя автора", "фио автора",
     "фамилия автора", "фамилии автора", "имя автора", "имена автора",
     "фамилия и имя автора", "фамилии авторов",
-    "исполнитель", "исполнители", "читает", "чтец", "жанр", "жанры", "прочитано по изданию",
+    "исполнитель", "исполнители", "читает", "текст читает", "чтец",
+    "автор и исполнитель", "жанр", "жанры", "прочитано по изданию",
     "тип", "тип издания", "категория", "формат", "язык", "страна",
     "аудиокодек", "аудио кодек", "битрейт", "битрейт аудио", "вид битрейта",
     "частота дискретизации", "количество каналов (моно-стерео)",
@@ -959,10 +1042,18 @@ def _infer_author_from_subject(raw_topic_title: str, body_title: str) -> str:
         right = _clean(right).strip('«»"“” ')
         if not right:
             return False
+        body_tokens = _title_tokens(body_title)
+        right_tokens = _title_tokens(right)
+        overlap = body_tokens & right_tokens
+        legacy_shared_title = bool(
+            len(overlap) >= 4
+            and len(overlap) / min(len(body_tokens), len(right_tokens)) >= 0.6
+        )
         return (
             _body_title_related_to_subject(body_title, right)
             or _body_title_related_to_subject(right, body_title)
             or bool(body_key and value_key and body_key == value_key)
+            or legacy_shared_title
         )
 
     sep_re = re.compile(r"(?:\s+[-–—]\s*|\s*[-–—]\s+)")
@@ -1040,6 +1131,8 @@ def _looks_like_subject_narrator(value: str, *, allow_single_alias: bool = False
 
 def _infer_narrators_from_subject(raw_topic_title: str) -> list[str]:
     value = _clean(raw_topic_title)
+    if re.search(r"(?i)\[\s*читают\s+авторы(?:\s*[,;]|\s*\])", value):
+        return ["Авторы"]
     # The people/release group is not always the final bracket: an edition or
     # publisher group may follow it (e.g. `[cast, 1964, MP3] [Мелодия, WEB]`).
     for match in reversed(list(re.finditer(r"\[([^\[\]]*)\]", value))):
@@ -1081,6 +1174,10 @@ def _clean_catalog_title_candidate(value: str, authors: list[str]) -> str:
     if not text:
         return ""
 
+    # Decorative separator rows can be flattened into the visual heading by
+    # BeautifulSoup.  They carry no title information.
+    text = re.sub(r"\s*(?:=\s*){3,}", ". ", text)
+
     # A broken upstream page once leaked the HTTP status text into the topic
     # title between the author and the actual work name.
     text = re.sub(r"(?i)^bad[ _-]*gateway\s*[-–—:]\s*", "", text, count=1)
@@ -1095,13 +1192,34 @@ def _clean_catalog_title_candidate(value: str, authors: list[str]) -> str:
         text,
         count=1,
     ).strip()
+    text = re.sub(
+        r"(?i)^аудиосборник\s+(?=[«\"“])",
+        "",
+        text,
+        count=1,
+    ).strip()
+    text = re.sub(
+        r"(?i)\.\s*аудиоспектакль\s*$",
+        "",
+        text,
+    ).strip()
+    text = re.sub(
+        r"(?i)^ислам\s*[-–—:]\s*(?=сборник\s+лекций\b)",
+        "",
+        text,
+        count=1,
+    ).strip()
     text = re.sub(r"(?i)\s+[-–—]\s*CD\s+к\s+книге\s*$", "", text).strip()
 
     # Parenthesized release type remains a safe boundary. In the middle of a
     # genuine title, however, the word "аудиокнига" is not technical by
     # itself. Treat it as a boundary only when an actual codec/rip marker
     # immediately follows (e.g. "аудиокнига MP3").
-    marker = re.search(r"(?i)\s*\(\s*(?:аудиокнига|audio\s*book)\s*\)", text)
+    marker = re.search(
+        r"(?i)\s*\(\s*(?:аудиокнига|аудиоспектакль|"
+        r"аудиожурнал|audio\s*book)\s*\)",
+        text,
+    )
     if not marker:
         marker = re.search(
             r"(?i)\s+(?:аудиокнига|audio\s*book)\s+"
@@ -1114,6 +1232,15 @@ def _clean_catalog_title_candidate(value: str, authors: list[str]) -> str:
         marker = _CATALOG_TITLE_TECH_RE.search(text)
         if marker and marker.start() >= 3:
             text = text[:marker.start()]
+            # Some malformed legacy subjects omit the opening release
+            # bracket: ``..., 2016 г., 128 kbps, MP3]``.  Once the codec or
+            # bitrate proves the boundary, the immediately preceding year is
+            # release metadata too.
+            text = re.sub(
+                r"(?i)(?:,\s*|\s+)(?:19|20)\d{2}\s*г?\.?\s*,?\s*$",
+                "",
+                text,
+            )
     # Cutting at a codec inside `[MP3]` can leave the opening bracket behind.
     text = re.sub(r"\s*\[\s*$", "", text)
     text = _clean(text).rstrip(" ,;:/-–—")
@@ -1125,6 +1252,13 @@ def _clean_catalog_title_candidate(value: str, authors: list[str]) -> str:
         r"\1",
         text,
     )
+    text = re.sub(
+        r"(?i)\s*\+\s*(?:DOC|DOCX|FB2|EPUB|MOBI|PDF)"
+        r"(?:\s*,\s*(?:DOC|DOCX|FB2|EPUB|MOBI|PDF))*\s*$",
+        "",
+        text,
+    )
+    text = re.sub(r"^[-–—]+\s*", "", text)
     quoted = re.match(r'^[«"“](.+?)[»"”]\s+(.+)$', text)
     if quoted and authors:
         quoted_title = _clean(quoted.group(1))
@@ -1136,7 +1270,12 @@ def _clean_catalog_title_candidate(value: str, authors: list[str]) -> str:
     text = re.sub(r"(?<=[А-Яа-яЁё])\.(?=[А-ЯЁ][а-яё])", ". ", text)
     text = _clean(text).strip()
     if len(text) >= 2 and (text[0], text[-1]) in {("\"", "\""), ("«", "»"), ("“", "”")}:
-        text = _clean(text[1:-1])
+        opening, closing = text[0], text[-1]
+        interior = text[1:-1]
+        # Keep the edge quotes of a quoted list. Removing them from
+        # ``"Title one", "Title two"`` leaves an unbalanced result.
+        if opening not in interior and closing not in interior:
+            text = _clean(interior)
     if text.count("«") == text.count("»") + 1:
         text += "»"
     return text
@@ -1212,6 +1351,17 @@ def _topic_display_title(post, raw_topic_title: str, authors: list[str] | None =
             text = _node_text(node)
             if not text:
                 continue
+            if re.fullmatch(
+                r"(?i)помощь\s*\|\s*донаты\s*\|\s*donations",
+                text,
+            ):
+                continue
+            if re.fullmatch(
+                r"(?i)набор\s+в\s+группу\s+«хранители»\s*[-–—]\s*"
+                r"помогите\s+сохранить\s+редкие\s+раздачи",
+                text,
+            ):
+                continue
             if re.fullmatch(r"(?i)(?:книга|том|часть)\s*\d+", text):
                 continue
             if len(text) <= 300:
@@ -1252,8 +1402,39 @@ def _topic_authors(post, post_text: str) -> list[str]:
         # the given-name field. It must not be joined to the real surname field.
         if re.match(r"(?i)^перевод(?:чик|чики)?\b|^перевод\s+на\b", given):
             given = ""
+        if not _normalize_author_item(surname):
+            surname = ""
+        if not _normalize_author_item(given):
+            given = ""
+        if not surname and not given:
+            return []
         surnames = _split_people(surname)
         given_names = _split_people(given)
+        if surnames and not given_names:
+            return [
+                person for person in (_normalize_author_item(v) for v in surnames)
+                if person
+            ]
+        if given_names and not surnames:
+            return [
+                person for person in (_normalize_author_item(v) for v in given_names)
+                if person
+            ]
+        # Some legacy forms store one shared family name and several given
+        # names: ``Кови`` + ``Шон, Стивен Р.``.
+        if len(surnames) == 1 and len(given_names) > 1:
+            return [
+                _clean(f"{surnames[0]} {given_name}")
+                for given_name in given_names
+            ]
+        # Corrupt comma placement can split two one-word credits across the
+        # surname/name fields (topic 4336065).
+        if (
+            len(surnames) == len(given_names) == 1
+            and surname.rstrip().endswith(",")
+            and given.lstrip().startswith(",")
+        ):
+            return [surnames[0], given_names[0]]
         if len(surnames) == len(given_names) == 1 and _same_person(surnames[0], given_names[0]):
             value = _normalize_author_item(surnames[0])
             return [value] if value else []
@@ -1265,6 +1446,31 @@ def _topic_authors(post, post_text: str) -> list[str]:
             ]
         value = _normalize_author_item(_clean(f"{surname} {given}"))
         return [value] if value else []
+    screenplay = re.search(
+        r"(?im)(?:^|:\s*)авторы?\s+сценария\s*[:：]\s*"
+        r"([^\n.]{3,240})",
+        post_text,
+    )
+    if screenplay:
+        return [
+            person
+            for person in (
+                _normalize_author_item(value)
+                for value in _split_people(screenplay.group(1))
+            )
+            if person
+        ]
+    joint = _joint_author_performers(post_text)
+    if joint:
+        return joint
+    text_credit = re.search(
+        r"(?im)^\s*текст\s*[:：]\s*(?:\n\s*)?"
+        r"([A-ZА-ЯЁ][A-Za-zА-Яа-яЁё'’-]{2,39})\.\s+"
+        r"(?=[A-ZА-ЯЁ])",
+        post_text,
+    )
+    if text_credit:
+        return [_normalize_author_item(text_credit.group(1))]
     return []
 
 
@@ -1389,6 +1595,10 @@ def _series_hint_id(series_name: str, position: int, title: str) -> str:
 
 def _clean_series_entry_title(value: str, narrators: list[str]) -> str:
     title = _clean(value)
+    # RuTracker link text is sometimes the literal URL, followed by narrator
+    # notes or alternate editions.  The parsed entry already stores the first
+    # topic link separately, so none of that belongs in its display title.
+    title = re.split(r"(?i)\s+https?://", title, maxsplit=1)[0]
     title = re.split(
         r"(?i)\s+(?:описание|доп\.?\s*информация)\s*[:：]",
         title,
@@ -1396,9 +1606,28 @@ def _clean_series_entry_title(value: str, narrators: list[str]) -> str:
     )[0]
     title = re.split(r"(?i)\s*//\s*автор\s*[:：]", title, maxsplit=1)[0]
     title = re.split(r"(?i)\s*,?\s+в\s+исполнении\s+", title, maxsplit=1)[0]
+    title = re.split(
+        r"(?i)\s+книги\s+цикла\s+на\s+трекере\b",
+        title,
+        maxsplit=1,
+    )[0]
+    title = re.split(r"\s+\*(?=\S)", title, maxsplit=1)[0]
     title = re.sub(
         r"(?i)\s*[-–—]?\s*(?:данн(?:ый|ая)\s+(?:релиз|раздача|аудиокнига|книга)|"
         r"эта\s+раздача)\s*$",
+        "",
+        title,
+    )
+    # Some hand-written reading orders append publication/context notes to a
+    # real title.  These phrases describe the entry but are not part of it.
+    title = re.sub(
+        r"(?i)\s*[;,]?\s*книга\s+вышла\b.*$",
+        "",
+        title,
+    )
+    title = re.sub(
+        r"(?i)\s*[;,]?\s*т\s*\.?\s*е\s*\.?\s+как\s+раз\s+"
+        r"перед\s+событиями\s+романа\b.*$",
         "",
         title,
     )
@@ -1547,31 +1776,115 @@ def _parse_series_lines(
     active = not require_heading
     seen_numbered = False
 
-    for fragment in fragments:
+    def is_list_heading(frag, text: str) -> bool:
+        # ``Цикл/серия: Name`` is the ordinary metadata field.  It identifies
+        # the current book's series but must not activate parsing of every
+        # numbered block that follows (most often a chapter list).
+        metadata_label = any(
+            _normalized_post_label(_node_text(node))
+            in {"цикл/серия", "цикл", "серия"}
+            for node in frag.select("span.post-b")
+        )
+        if metadata_label and re.match(
+            r"(?i)^(?:цикл\s*/\s*серия|цикл|серия)\s*[:：]",
+            text,
+        ):
+            return False
+
+        candidates = [text]
+        candidates.extend(
+            _node_text(node)
+            for node in frag.select("a.postLink, span.post-b, div.sp-head")
+        )
+        series_key = _series_title_key(series_name)
+        for candidate in candidates:
+            candidate = _clean(candidate)
+            heading = _series_heading_name(candidate)
+            if heading and _series_title_key(heading) == series_key:
+                return True
+
+            bare = _clean(candidate).strip(" :：;,.«»\"“”")
+            if (
+                bare
+                and frag.select_one('a[href*="viewtopic.php?t="]') is None
+                and _series_title_key(bare) == series_key
+            ):
+                return True
+
+            if re.fullmatch(
+                r"(?i)(?:содержание|книги|произведения)\s+"
+                r"(?:цикла|серии)\s*[:：]?",
+                bare,
+            ):
+                return True
+
+        return bool(re.match(
+            r"(?i)^(?:весь\s+)?(?:под)?цикл\b.*(?:раздач|аудиокниг)",
+            text,
+        ))
+
+    # A top-level numbered entry may itself contain an ``ol``/``ul`` for a
+    # subcycle.  ``_series_fragments`` splits on ``br`` and therefore exposes
+    # later nested items as if they belonged to the outer reading order.  Keep
+    # the outer prefix and suppress fragments until the embedded list closes.
+    visible_fragments: list[str] = []
+    embedded_list_depth = 0
+    for raw_fragment in fragments:
+        opens = len(re.findall(r"(?i)<(?:ol|ul)\b", raw_fragment))
+        closes = len(re.findall(r"(?i)</(?:ol|ul)\s*>", raw_fragment))
+        if embedded_list_depth:
+            embedded_list_depth = max(0, embedded_list_depth + opens - closes)
+            continue
+
+        opening = re.search(r"(?i)<(?:ol|ul)\b", raw_fragment)
+        if opening is not None:
+            prefix = raw_fragment[:opening.start()]
+            prefix_text = _clean(
+                BeautifulSoup(prefix, "html.parser").get_text(" ", strip=True)
+            )
+            is_numbered_parent = bool(re.match(
+                r"^(?:[📘📗📙📕📚]\s*)?\d{1,3}[.)]\s*\S+",
+                prefix_text,
+            ))
+            if not is_numbered_parent:
+                # Older RuTracker markup sometimes wraps the *outer* series
+                # lines in an ``ol`` without using ``li`` elements.  Preserve
+                # that container: the ordinary numbered-line parser handles
+                # its ``br``-separated entries.
+                visible_fragments.append(raw_fragment)
+                continue
+            if prefix.strip():
+                visible_fragments.append(prefix)
+            embedded_list_depth = max(0, opens - closes)
+            continue
+
+        visible_fragments.append(raw_fragment)
+
+    for fragment in visible_fragments:
+        full_frag = BeautifulSoup(fragment, "html.parser")
+        full_text = _clean(full_frag.get_text(" ", strip=True))
+        if full_text and is_list_heading(full_frag, full_text):
+            active = True
+            continue
+
         fragment = re.split(r"(?is)<(?:div|table|hr)\b", fragment, maxsplit=1)[0]
         frag = BeautifulSoup(fragment, "html.parser")
         text = _clean(frag.get_text(" ", strip=True))
         if not text:
             continue
 
-        heading = _series_heading_name(text)
-        if heading and (not series_name or heading.casefold() == series_name.casefold()):
-            active = True
-            continue
         if require_heading and not active:
-            for node in frag.select("a.postLink, span.post-b, div.sp-head"):
-                heading = _series_heading_name(_node_text(node))
-                if heading and heading.casefold() == series_name.casefold():
-                    active = True
-                    break
-            if not active:
-                continue
-            if not re.search(r"(?:^|\s)\d{1,3}[.)]\s*", text):
-                continue
+            continue
 
         m = re.match(r"^(?:[📘📗📙📕📚]\s*)?(\d{1,3})[.)]\s*(.+)$", text)
         if not m:
             if active and seen_numbered:
+                # Cycle spoilers sometimes interleave notes or an unnumbered
+                # prequel between numbered books. A spoiler is bounded, so
+                # skip that annotation and keep looking. For the whole post,
+                # retain the hard boundary to avoid absorbing chapter lists.
+                if not require_heading:
+                    continue
                 break
             continue
 
@@ -1709,7 +2022,7 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
         "Фамилия автора", "Фамилии автора", "Имя автора", "Имена автора",
         "Фамилия и имя автора", "Фамилии авторов",
     )
-    narrator_labels = ("Исполнитель", "Исполнители", "Читает", "Чтец")
+    narrator_labels = ("Исполнитель", "Исполнители", "Читает", "Текст читает", "Чтец")
     genre_labels = ("Жанр", "Жанры")
     series_labels = ("Цикл/серия", "Цикл", "Серия")
     position_labels = ("Номер книги", "Номер в серии", "№ книги")
@@ -1732,6 +2045,9 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
         or _label_value(post_text, ("Название", "Наименование", "Название книги", "Название произведения"))
         or _topic_display_title(post, raw_topic_title, authors)
     )
+    if _ANONYMOUS_AUTHOR_CONTEXT_RE.search(post_text):
+        raw_topic_title = _strip_anonymous_release_prefix(raw_topic_title)
+        body_title = _strip_anonymous_release_prefix(body_title)
     sermon_speaker = (
         _sermon_speaker_from_title(raw_topic_title, post_text)
         or _sermon_speaker_from_title(body_title, post_text)
@@ -1754,7 +2070,11 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
         authors,
     )
     if not narrators:
-        narrators = _post_cast_narrators(post) or _infer_narrators_from_subject(raw_topic_title)
+        narrators = (
+            _joint_author_performers(post_text)
+            or _post_cast_narrators(post)
+            or _infer_narrators_from_subject(raw_topic_title)
+        )
     if not narrators and sermon_speaker:
         narrators = [sermon_speaker]
     title, explicit_title_narrators = _title_narrator(title)
