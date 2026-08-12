@@ -281,6 +281,24 @@ def _split_people(value: str) -> list[str]:
     return out
 
 
+def _topic_narrators(value: str, authors: list[str]) -> list[str]:
+    raw = _clean(value)
+    if not raw:
+        return []
+    marker = re.sub(r"(?i)\s*\(\s*ЛИ\s*\)\s*$", "", raw).strip().casefold()
+    if marker in {"автор", "читает автор", "чтец автор", "исполняет автор"}:
+        return list(authors)
+
+    # Narrator fields sometimes describe the action instead of containing only
+    # a display name. Keep the person and discard the prose/music credit.
+    raw = re.sub(r"(?i)^коран\s+читает\s+", "", raw)
+    raw = re.sub(r"(?i)^читает\s+и\s+по[её]т\s+", "", raw)
+    raw = re.sub(r"(?i)^читает\s+", "", raw)
+    raw = re.split(r"(?i)\.\s*музыка\b", raw, maxsplit=1)[0]
+    raw = re.split(r"(?i)\s+-\s+(?:читает|исполняет|передразнивает)\b", raw, maxsplit=1)[0]
+    return _split_people(raw)
+
+
 def _post_field(post, labels: tuple[str, ...]) -> str:
     if post is None:
         return ""
@@ -457,6 +475,17 @@ def _author_prefix_matches(left: str, authors: list[str]) -> bool:
 def _strip_release_suffix(raw_topic_title: str) -> tuple[str, bool]:
     value = _clean(raw_topic_title)
     removed_release_group = False
+    # Old subjects may append navigation notes and loose audio metadata after
+    # the normal bracketed release group.
+    value = re.sub(r"\s*\+?\s*<[^<>]{1,80}>\s*$", "", value)
+    loose_meta = re.search(
+        r"(?i)(?:\s*,\s*(?:mp3|m4[ab]|aac|ogg|opus|flac|wav|wma|"
+        r"\d{2,4}\s*(?:kbps|кбит(?:/с)?|кб/с)))+\s*$",
+        value,
+    )
+    if loose_meta:
+        value = _clean(value[:loose_meta.start()])
+        removed_release_group = True
     while value:
         match = re.search(r"\s*\[([^\[\]]*)\]\s*$", value)
         if not match:
@@ -933,8 +962,16 @@ def _topic_authors(post, post_text: str) -> list[str]:
     direct = _post_field(post, direct_labels) or _label_value(post_text, direct_labels)
     if direct:
         return _split_people(direct)
-    surname = _post_field(post, ("Фамилия автора", "Фамилии автора")) or _label_value(post_text, ("Фамилия автора", "Фамилии автора"))
-    given = _post_field(post, ("Имя автора", "Имена автора")) or _label_value(post_text, ("Имя автора", "Имена автора"))
+    surname_labels = ("Фамилия автора", "Фамилии автора")
+    given_labels = ("Имя автора", "Имена автора")
+    surname = _post_field(post, surname_labels)
+    given = _post_field(post, given_labels)
+    # An explicitly present but empty HTML field must stay empty. Text-regex
+    # fallback otherwise consumes the following label as its value.
+    if not surname and not _post_field_present(post, post_text, surname_labels):
+        surname = _label_value(post_text, surname_labels)
+    if not given and not _post_field_present(post, post_text, given_labels):
+        given = _label_value(post_text, given_labels)
     if surname or given:
         surnames = _split_people(surname)
         given_names = _split_people(given)
@@ -1211,9 +1248,10 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
             authors = _split_people(inferred_author)
 
     title = _select_topic_title(raw_topic_title, body_title, authors) or f"RuTracker {topic_id}"
-    narrators = _split_people(
+    narrators = _topic_narrators(
         _post_field(post, narrator_labels)
-        or _label_value(post_text, narrator_labels)
+        or _label_value(post_text, narrator_labels),
+        authors,
     )
     if not narrators:
         narrators = _infer_narrators_from_subject(raw_topic_title)
@@ -1260,6 +1298,11 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
         or inferred_series_name
         or series_genre_hint
     )
+    if series_name and re.search(r"(?i)\bаудиокнига\s*[:.]", title):
+        candidate = re.split(r"(?i)\bаудиокнига\s*[:.]\s*", title, maxsplit=1)[-1]
+        candidate = _clean(candidate).strip("«»\"'‘’ “”) ")
+        if candidate:
+            title = candidate
     if series_name and (inferred_series_name or series_genre_hint):
         metadata_fields_present.add("series")
     position_raw = _post_field(post, position_labels) or _label_value(post_text, position_labels)
