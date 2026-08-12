@@ -294,8 +294,15 @@ def _post_field(post, labels: tuple[str, ...]) -> str:
         while node is not None:
             name = getattr(node, "name", None)
             classes = set(getattr(node, "get", lambda *_: [])("class") or []) if name else set()
-            if name in {"br", "hr"} or (name == "span" and "post-b" in classes):
+            if name in {"br", "hr"}:
                 break
+            if name == "span" and "post-b" in classes:
+                nested_text = _node_text(node)
+                # Some old topics bold both the label and its value.  A bold
+                # sibling is a boundary only when it actually looks like a
+                # known field label; otherwise it is the field value.
+                if _normalized_post_label(nested_text) in _KNOWN_POST_LABELS:
+                    break
             if hasattr(node, "get_text"):
                 text = _node_text(node)
             else:
@@ -558,7 +565,9 @@ def normalize_topic_subject_title(raw_topic_title: str, authors: list[str]) -> s
 
 _KNOWN_POST_LABELS = {
     "год выпуска", "год издания", "автор", "авторы", "aвтор", "aвторы",
-    "фамилия автора", "имя автора", "фамилия и имя автора", "фамилии авторов",
+    "автор (никнейм)", "фамилия имя автора", "фио автора",
+    "фамилия автора", "фамилии автора", "имя автора", "имена автора",
+    "фамилия и имя автора", "фамилии авторов",
     "исполнитель", "исполнители", "читает", "чтец", "жанр", "жанры", "прочитано по изданию",
     "тип", "тип издания", "категория", "формат", "язык", "страна",
     "аудиокодек", "аудио кодек", "битрейт", "битрейт аудио", "вид битрейта",
@@ -717,6 +726,16 @@ def _infer_author_from_subject(raw_topic_title: str, body_title: str) -> str:
             and (body_key == right_key or legacy_year_suffix or _looks_like_strict_colon_person_prefix(left))
         ):
             return left
+
+    # Very old topics may have no separate body-title or author field.  Once a
+    # technical release suffix was definitely removed, accept a strict person
+    # prefix before a spaced dash (e.g. `Кристи Агата - Название [cast, kbps]`).
+    if value != raw_value:
+        legacy = re.match(r"^(.{2,100}?)\s+[-–—]\s+(.+)$", value)
+        if legacy:
+            left, right = _clean(legacy.group(1)), _clean(legacy.group(2))
+            if _looks_like_person_prefix(left) and len(_title_tokens(right)) >= 2:
+                return left
     return ""
 
 
@@ -736,27 +755,26 @@ def _looks_like_subject_narrator(value: str, *, allow_single_alias: bool = False
 
 def _infer_narrators_from_subject(raw_topic_title: str) -> list[str]:
     value = _clean(raw_topic_title)
-    match = re.search(r"\[([^\[\]]*)\]\s*$", value)
-    if not match:
-        return []
-
-    release = _clean(match.group(1))
-    technical = _RELEASE_META_RE.search(release)
-    if not technical:
-        return []
-
-    people_segment = _clean(release[:technical.start()]).rstrip(" ,;/")
-    if not people_segment:
-        return []
-
-    had_li_marker = bool(re.search(r"(?i)\(\s*ЛИ\s*\)", people_segment))
-    out: list[str] = []
-    for candidate in _split_people(people_segment):
-        if not _looks_like_subject_narrator(candidate, allow_single_alias=had_li_marker):
+    # The people/release group is not always the final bracket: an edition or
+    # publisher group may follow it (e.g. `[cast, 1964, MP3] [Мелодия, WEB]`).
+    for match in reversed(list(re.finditer(r"\[([^\[\]]*)\]", value))):
+        release = _clean(match.group(1))
+        technical = _RELEASE_META_RE.search(release)
+        if not technical:
             continue
-        if candidate not in out:
-            out.append(candidate)
-    return out
+        people_segment = _clean(release[:technical.start()]).rstrip(" ,;/")
+        if not people_segment:
+            continue
+        had_li_marker = bool(re.search(r"(?i)\(\s*ЛИ\s*\)", people_segment))
+        out: list[str] = []
+        for candidate in _split_people(people_segment):
+            if not _looks_like_subject_narrator(candidate, allow_single_alias=had_li_marker):
+                continue
+            if candidate not in out:
+                out.append(candidate)
+        if out:
+            return out
+    return []
 
 
 _CATALOG_TITLE_TECH_RE = re.compile(
@@ -909,17 +927,35 @@ def _topic_display_title(post, raw_topic_title: str, authors: list[str] | None =
 def _topic_authors(post, post_text: str) -> list[str]:
     direct_labels = (
         "Автор", "Авторы", "Aвтор", "Aвторы",
+        "Автор (никнейм)", "Фамилия Имя автора", "ФИО автора",
         "Фамилия и имя автора", "Фамилии авторов",
     )
     direct = _post_field(post, direct_labels) or _label_value(post_text, direct_labels)
     if direct:
         return _split_people(direct)
-    surname = _post_field(post, ("Фамилия автора",)) or _label_value(post_text, ("Фамилия автора",))
-    given = _post_field(post, ("Имя автора",)) or _label_value(post_text, ("Имя автора",))
+    surname = _post_field(post, ("Фамилия автора", "Фамилии автора")) or _label_value(post_text, ("Фамилия автора", "Фамилии автора"))
+    given = _post_field(post, ("Имя автора", "Имена автора")) or _label_value(post_text, ("Имя автора", "Имена автора"))
     if surname or given:
+        surnames = _split_people(surname)
+        given_names = _split_people(given)
+        if len(surnames) == len(given_names) and len(surnames) > 1:
+            return [_clean(f"{given_name} {family_name}") for family_name, given_name in zip(surnames, given_names)]
         value = _normalize_person_item(_clean(f"{surname} {given}"))
         return [value] if value else []
     return []
+
+
+def _title_narrator(value: str) -> tuple[str, list[str]]:
+    """Extract an explicit trailing `. Чтец Name` marker from a title."""
+    text = _clean(value)
+    match = re.search(r"(?i)(?:^|[.!?;])\s*чтец\s+(.+?)\s*$", text)
+    if not match:
+        return text, []
+    person = _normalize_person_item(match.group(1))
+    if not person or any(ch.isdigit() for ch in person) or _RELEASE_META_RE.search(person):
+        return text, []
+    clean_title = _clean(text[:match.start()]).rstrip(" .!?,;:/-–—")
+    return clean_title, [person]
 
 
 def _cover_from_post(post, base_url: str) -> str:
@@ -1141,7 +1177,9 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
 
     author_labels = (
         "Автор", "Авторы", "Aвтор", "Aвторы",
-        "Фамилия автора", "Имя автора", "Фамилия и имя автора", "Фамилии авторов",
+        "Автор (никнейм)", "Фамилия Имя автора", "ФИО автора",
+        "Фамилия автора", "Фамилии автора", "Имя автора", "Имена автора",
+        "Фамилия и имя автора", "Фамилии авторов",
     )
     narrator_labels = ("Исполнитель", "Исполнители", "Читает", "Чтец")
     genre_labels = ("Жанр", "Жанры")
@@ -1179,6 +1217,11 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
     )
     if not narrators:
         narrators = _infer_narrators_from_subject(raw_topic_title)
+    title, explicit_title_narrators = _title_narrator(title)
+    if explicit_title_narrators:
+        for person in explicit_title_narrators:
+            if person not in narrators:
+                narrators.append(person)
 
     # Some legacy subjects duplicate a confirmed narrator in a final [Name]
     # suffix. Remove only that exact people suffix after narrator metadata has
@@ -1225,6 +1268,13 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
         post, topic_url, base_url, series_name, series_position,
         current_title=title, authors=authors,
     )
+
+    # Fallback extraction can populate people after the source-field presence
+    # scan. Keep this diagnostic field aligned with the final record.
+    if authors:
+        metadata_fields_present.add("authors")
+    if narrators:
+        metadata_fields_present.add("narrators")
 
     magnet = ""
     magnet_link = soup.select_one(
