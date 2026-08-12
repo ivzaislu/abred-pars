@@ -283,8 +283,10 @@ _STANDALONE_PEOPLE_NOISE = {
     "митрополит", "епископ", "архиепископ", "протоиерей",
     "иеромонах", "священник", "отец",
     "др", "др.", "другие",
-    # Service marker seen in RuTracker narrator metadata, not a person.
-    "ли", "подробности далее",
+    # Service prose seen in RuTracker people metadata, not a person.  The
+    # release marker ``(ЛИ)`` is narrator-specific and must not be handled
+    # here: ``Ли`` is also a legitimate surname (Bruce Lee, Harper Lee).
+    "подробности далее",
     # A profession-only fragment from a comma-separated author field.  The
     # actual person's name is supplied by the following fragment.
     "ученый каббалист", "учёный каббалист",
@@ -435,6 +437,9 @@ def _strip_person_honorific(value: str) -> str:
 
 
 def _normalize_narrator_item(value: str) -> str:
+    marker = _clean(value).strip("()[]{}<>«»\"' .,:;").casefold()
+    if marker == "ли":
+        return ""
     item = _normalize_person_item(value)
     if not item:
         return ""
@@ -562,6 +567,15 @@ def _post_cast_narrators(post) -> list[str]:
         folded = _normalized_post_label(line)
         if folded in _KNOWN_POST_LABELS:
             break
+        if out and re.match(
+            r"(?i)^(?:премьера\b|автор\s+радиоверсии\b|"
+            r"режисс[её]р(?:-постановщик)?\b|композитор\b|"
+            r"звукорежисс[её]р(?:ы)?\b|шеф-редактор\b|редактор\b|"
+            r"продюсер\b|при\s+финансовой\s+поддержке\b|"
+            r"набор\s+в\s+группу\b|помощь\s*\|\s*донаты\b)",
+            line,
+        ):
+            break
         if re.match(r"(?i)^(?:в эпизодах|музыка\b|оркестр\b)", line):
             continue
         match = re.match(r"^.+?\s+[-–—]\s+(.+)$", line)
@@ -569,9 +583,11 @@ def _post_cast_narrators(post) -> list[str]:
         people = _split_people(people_value)
         if not match:
             people = [person for person in people if _looks_like_person_prefix(person)]
-        for person in people:
-            if person not in out:
-                out.append(person)
+        for raw_person in people:
+            normalized = _normalize_narrator_item(raw_person)
+            for person in _split_people(normalized):
+                if person and person not in out:
+                    out.append(person)
     return out
 
 
@@ -663,6 +679,7 @@ _RELEASE_META_RE = re.compile(
 
 _AUTHOR_PREFIX_NOISE = {
     "и", "др", "and", "et", "al",
+    "академик", "профессор",
     "митрополит", "епископ", "архиепископ", "архимандрит", "протоиерей",
     "иеромонах", "монах", "священник", "отец",
 }
@@ -934,6 +951,7 @@ _KNOWN_POST_LABELS = {
     "аудиокодек", "аудио кодек", "битрейт", "битрейт аудио", "вид битрейта",
     "частота дискретизации", "количество каналов (моно-стерео)",
     "время звучания", "продолжительность", "продолжительность общая", "описание", "доп. информация",
+    "другие версии", "другие раздачи",
     "цикл/серия", "цикл", "серия", "номер книги", "номер в серии", "№ книги",
 }
 
@@ -1031,6 +1049,15 @@ def _looks_like_strict_colon_person_prefix(value: str) -> bool:
     return True
 
 
+def _looks_like_person_list(value: str) -> bool:
+    """Recognize an explicit comma-separated list of complete people."""
+    people = _split_people(value)
+    return bool(
+        2 <= len(people) <= 12
+        and all(_looks_like_person_prefix(person) for person in people)
+    )
+
+
 def _infer_author_from_subject(raw_topic_title: str, body_title: str) -> str:
     raw_value = _clean(raw_topic_title)
     value, _ = _strip_release_suffix(raw_topic_title)
@@ -1060,7 +1087,14 @@ def _infer_author_from_subject(raw_topic_title: str, body_title: str) -> str:
     for match in sep_re.finditer(value):
         left = _clean(value[:match.start()])
         right = _clean(value[match.end():])
-        if not left or not right or not _looks_like_person_prefix(left):
+        if (
+            not left
+            or not right
+            or not (
+                _looks_like_person_prefix(left)
+                or _looks_like_person_list(left)
+            )
+        ):
             continue
         if subject_match(right):
             return left
@@ -1797,11 +1831,45 @@ def _parse_series_lines(
             for node in frag.select("a.postLink, span.post-b, div.sp-head")
         )
         series_key = _series_title_key(series_name)
+
+        # Malformed legacy markup can leave an explicit heading attached to
+        # the end of the preceding description after splitting on ``br``.
+        if re.search(
+            r"(?i)(?:содержание|книги|произведения)\s+"
+            r"(?:цикла|серии)\s*[:：]?\s*$",
+            text,
+        ):
+            return True
+
+        named_cycle = re.search(
+            r"(?i)(?:^|[:：]\s*)цикл\s*[«\"“](.+?)[»\"”]\s*[:：]?\s*$",
+            text,
+        )
+        if (
+            named_cycle
+            and _series_title_key(named_cycle.group(1)) == series_key
+        ):
+            return True
+
         for candidate in candidates:
             candidate = _clean(candidate)
             heading = _series_heading_name(candidate)
             if heading and _series_title_key(heading) == series_key:
                 return True
+
+            # Some long-running fan series name a narrower saga in the list
+            # heading and explicitly say that the following order is the
+            # narration order.  Require both signals and a name contained in
+            # the confirmed series metadata, so an arbitrary numbered block
+            # cannot activate series parsing.
+            if re.search(
+                r"(?i)\bперечень\s+в\s+порядке\s+(?:озвучания|чтения)\b",
+                candidate,
+            ):
+                quoted = re.search(r"[«\"“](.+?)[»\"”]", candidate)
+                quoted_key = _series_title_key(quoted.group(1)) if quoted else ""
+                if quoted_key and quoted_key in series_key:
+                    return True
 
             bare = _clean(candidate).strip(" :：;,.«»\"“”")
             if (
@@ -2140,6 +2208,19 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
         or inferred_series_name
         or series_genre_hint
     )
+    clean_body_title = _clean_catalog_title_candidate(body_title, authors)
+    if (
+        series_name
+        and clean_body_title
+        and title != clean_body_title
+        and title.casefold().endswith(clean_body_title.casefold())
+    ):
+        prefix = _clean(title[:-len(clean_body_title)]).rstrip(" ,;:/-–—")
+        # Repair only a proven concatenation: the complete prefix must be the
+        # already-confirmed series field.  Numbered forms such as
+        # ``Series 03, Book`` intentionally keep their existing display title.
+        if _series_title_key(prefix) == _series_title_key(series_name):
+            title = clean_body_title
     if series_name and re.search(r"(?i)\bаудиокнига\s*[:.]", title):
         candidate = re.split(r"(?i)\bаудиокнига\s*[:.]\s*", title, maxsplit=1)[-1]
         candidate = _clean(candidate).strip("«»\"'‘’ “”) ")
@@ -2153,6 +2234,14 @@ def parse_topic_html(html: str, topic_url: str, base_url: str) -> ParsedBook:
         post, topic_url, base_url, series_name, series_position,
         current_title=title, authors=authors, narrators=narrators,
     )
+    if series_position is None and topic_series and topic_id:
+        current_positions = {
+            entry.position
+            for entry in topic_series.entries
+            if entry.external_id == topic_id
+        }
+        if len(current_positions) == 1:
+            series_position = current_positions.pop()
 
     # Fallback extraction can populate people after the source-field presence
     # scan. Keep this diagnostic field aligned with the final record.
