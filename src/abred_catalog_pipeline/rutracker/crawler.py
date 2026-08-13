@@ -141,6 +141,10 @@ def _held_page(current: int | None, page: int) -> int:
     return page if current is None else max(current, page)
 
 
+class _PermanentTopicReject(RuntimeError):
+    """Content is permanently non-playable and must not freeze a forum cursor."""
+
+
 def _assert_torrserver_ready(book) -> None:
     torrent = book.torrent
     if torrent is None or not torrent.info_hash:
@@ -151,7 +155,7 @@ def _assert_torrserver_ready(book) -> None:
         if item.media_type == "audio"
     }
     if not audio_indexes:
-        raise RuntimeError(
+        raise _PermanentTopicReject(
             f"RuTracker torrent metadata has no supported audio files: {book.external_url}"
         )
     if not book.chapters:
@@ -351,6 +355,9 @@ async def crawl_once(
                                             forum_metadata_hold_page,
                                             page,
                                         )
+                        except _PermanentTopicReject:
+                            metadata_stats["failed"] += 1
+                            raise
                         except Exception as exc:
                             metadata_stats["failed"] += 1
                             forum_metadata_blocked = True
@@ -420,13 +427,18 @@ async def crawl_once(
                         ]
                     records.append(record)
                 except Exception as exc:
+                    permanent_reject = isinstance(exc, _PermanentTopicReject)
                     rejected.append({
                         "source": "rutracker",
                         "external_id": row.topic_id,
                         "external_url": row.topic_url,
-                        "reason": "rutracker_topic_rejected",
+                        "reason": (
+                            "rutracker_unsupported_audio"
+                            if permanent_reject
+                            else "rutracker_topic_rejected"
+                        ),
                         "detail": str(exc)[:500],
-                        "non_blocking": False,
+                        "non_blocking": permanent_reject,
                     })
             if truncated:
                 break
@@ -459,9 +471,6 @@ async def crawl_once(
         advance_cursor and torrserver is not None and metadata_blocked_forums
     )
 
-    # Truncated/manual probes are non-persistent. Metadata holds are persisted
-    # per forum at the exact deep page that still needs a complete playable
-    # record, while other forums are allowed to advance normally.
     if truncated or not advance_cursor:
         next_forums = dict(state.forums)
         next_metadata_hashes = set(state.torrent_metadata_hashes)
