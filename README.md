@@ -1,13 +1,20 @@
 # Abred Catalog Pipeline
 
-Standalone GitHub-hosted catalog crawler/parser/feed writer for AudioBookRed.
-It does not connect to the production PostgreSQL database and never knows Abred UUIDs.
+Standalone catalog crawler/parser/feed producer for AudioBookRed.
 
-## Sources
+Current package version: `0.1.3`.
 
-### Audiopolka — Parser 0.1.0
+Producer does not connect to production PostgreSQL and emits source-native feed artifacts for Backend import.
 
-Each run always scans page 1 and then five descending backfill pages. The cursor is stored in `state/audiopolka.json`.
+## Audiopolka
+
+Workflow: `.github/workflows/audiopolka.yml`.
+
+Current schedule: every hour at `:17 UTC`.
+
+The workflow runs tests, crawls Audiopolka, uploads `feed.json` + `manifest.json`, and only then persists cursor state. Artifact publication must happen before cursor advancement so a failed upload cannot silently skip a cursor window.
+
+Local run:
 
 ```bash
 python -m abred_catalog_pipeline run-audiopolka \
@@ -15,51 +22,34 @@ python -m abred_catalog_pipeline run-audiopolka \
   --out artifacts
 ```
 
-### RuTracker — Parser 0.1.1
+## RuTracker
 
-All RuTracker HTTP traffic goes through a project-controlled Cloudflare Worker. GitHub Actions never talks to `rutracker.org` directly.
+Workflow: `.github/workflows/rutracker.yml`.
 
-Required GitHub Actions configuration:
+Current schedule: every 2 hours at `:47 UTC`.
 
-- variable `RUTRACKER_WORKER_URL`, e.g. `https://rutracker.johann0789.workers.dev`;
-- secret `RUTRACKER_WORKER_TOKEN`;
-- optional variable `RUTRACKER_WORKER_TOKEN_HEADER` (default `X-Proxy-Token`);
-- optional variable `RUTRACKER_WORKER_MODE` (`mirror` by default, `fetch` also supported);
-- optional variable `RUTRACKER_ENABLED=true` to enable scheduled full runs after manual verification.
+All RuTracker HTTP traffic goes through the project Worker. Scheduled production runs use TorrServer enrichment to resolve torrent transport into concrete files and chapters.
 
-Manual probe of one forum and five topics without advancing the cursor:
-
-```bash
-RUTRACKER_WORKER_URL=https://rutracker.example.workers.dev \
-RUTRACKER_WORKER_TOKEN=... \
-python -m abred_catalog_pipeline run-rutracker \
-  --forums 2387 \
-  --max-topics 5 \
-  --state state/rutracker.json \
-  --out artifacts
-```
-
-Optional raw `.torrent` enrichment probe (not required for a valid feed):
+Manual bounded probe:
 
 ```bash
 python -m abred_catalog_pipeline run-rutracker \
   --forums 2387 \
   --max-topics 5 \
-  --download-torrents \
   --state state/rutracker.json \
   --out artifacts
 ```
 
-A full cursor-advancing run uses all configured audiobook forums and the roadmap schedule `page 1 + five descending backfill pages` independently for each forum:
+A truncated `--max-topics` run never advances cursors.
 
-```bash
-python -m abred_catalog_pipeline run-rutracker \
-  --advance-cursor \
-  --state state/rutracker.json \
-  --out artifacts
-```
+RuTracker failure semantics:
 
-The stable source identity is the RuTracker `topic_id`, never the viewforum page number. `viewforum.php` discovers topics; `viewtopic.php?t=<topic_id>` supplies metadata. **Magnet + BTIH info-hash are the primary transport identity.** A normal run does not call `dl.php` and emits `torrent_metadata_status=magnet` with an empty file list until the backend/TorrServer resolves concrete files. Raw `.torrent` metainfo is an optional probe/enrichment only: pass `--download-torrents` (or enable the manual workflow checkbox) to try it through the same Worker. If that optional request fails while the topic still has a valid BTIH magnet, the record remains successful as `magnet_fallback`; the diagnostic is retained but the topic is not rejected.
+- deterministic unsupported-audio rejects do not hold the cursor;
+- transient network, Worker, mapping and chapter failures remain blocking;
+- transport errors, HTTP 429 and 5xx use bounded retry;
+- ordinary non-retriable 4xx responses fail immediately.
+
+Scheduled runs upload the artifact before persisting cursor/TorrServer state.
 
 ## Feed bundle
 
@@ -70,9 +60,16 @@ artifacts/<run-id>/feed.json
 artifacts/<run-id>/manifest.json
 ```
 
-`manifest.json` contains the SHA-256 and exact byte size of canonical `feed.json`.
+`manifest.json` contains SHA-256 and exact byte size of canonical `feed.json`.
 
-The feed contains source-native external IDs only. RuTracker records additionally contain torrent metadata (`info_hash`, magnet URI, torrent URL, file list, seed/leech snapshot) when available.
+GitHub Actions artifacts are named:
+
+```text
+audiopolka-feed-<github-run-id>
+rutracker-feed-<github-run-id>
+```
+
+Production Backend `ivzaislu/abred` validates and imports these artifacts through per-source `app.feed_auto` state. Producer never writes directly to Backend production DB.
 
 ## Tests
 
@@ -80,3 +77,5 @@ The feed contains source-native external IDs only. RuTracker records additionall
 pip install -e '.[test]'
 pytest -q
 ```
+
+Workflow runs execute tests before crawling/publishing.
