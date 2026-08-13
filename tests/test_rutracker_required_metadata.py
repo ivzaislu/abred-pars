@@ -27,14 +27,17 @@ class _Parser:
 
 
 class _TorrServer:
-    def __init__(self, *, fail_hash: str = ""):
+    def __init__(self, *, fail_hash: str = "", unsupported_hash: str = ""):
         self.calls: list[str] = []
         self.fail_hash = fail_hash
+        self.unsupported_hash = unsupported_hash
 
     async def ensure_metadata(self, info_hash: str, magnet_uri: str) -> ParsedTorrent:
         self.calls.append(info_hash)
         if info_hash == self.fail_hash:
             raise RuntimeError("metadata unavailable")
+        media_type = "other" if info_hash == self.unsupported_hash else "audio"
+        extension = "jpg" if media_type == "other" else "mp3"
         return ParsedTorrent(
             info_hash=info_hash,
             magnet_uri=magnet_uri,
@@ -42,9 +45,9 @@ class _TorrServer:
             files=[
                 ParsedTorrentFile(
                     index=0,
-                    path=f"Book/{info_hash[:8]}.mp3",
+                    path=f"Book/{info_hash[:8]}.{extension}",
                     size_bytes=1000,
-                    media_type="audio",
+                    media_type=media_type,
                 )
             ],
         )
@@ -189,3 +192,33 @@ async def test_missing_required_metadata_never_emits_incomplete_record_and_holds
     assert "TorrServer metadata is required" in result["rejected"][0]["detail"]
     assert result["cursor_held_for_metadata"] is True
     assert state.forums["2387"].deep_page == 5
+
+
+@pytest.mark.asyncio
+async def test_unsupported_audio_is_non_blocking_and_allows_cursor_to_advance(monkeypatch):
+    row = _rows()[0]
+    _patch(monkeypatch, [row])
+    torrserver = _TorrServer(unsupported_hash=HASH)
+    initial = RuTrackerState(
+        forums={"2387": ForumCursor(deep_page=5, last_page=10)},
+    )
+
+    result, state = await crawl_once(
+        _Parser(),
+        initial,
+        forum_ids=(2387,),
+        torrserver=torrserver,
+        torrserver_max_new=0,
+        torrserver_replay_successes=1,
+        advance_cursor=True,
+    )
+
+    assert result["records"] == []
+    assert len(result["rejected"]) == 1
+    rejected = result["rejected"][0]
+    assert rejected["reason"] == "rutracker_unsupported_audio"
+    assert rejected["non_blocking"] is True
+    assert "no supported audio files" in rejected["detail"]
+    assert result["cursor_held_for_metadata"] is False
+    assert result["cursor_advanced"] is True
+    assert state.forums["2387"].deep_page == 4
