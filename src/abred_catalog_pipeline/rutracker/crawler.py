@@ -164,7 +164,7 @@ async def crawl_once(
     next_metadata_hashes = set(state.torrent_metadata_hashes)
     next_metadata_pending = dict(state.torrent_metadata_pending)
     truncated = False
-    metadata_cursor_blocked = False
+    metadata_blocked_forums: set[str] = set()
     torrserver_max_new = max(0, int(torrserver_max_new or 0))
     torrserver_replay_successes = max(1, int(torrserver_replay_successes or 1))
     metadata_stats = {
@@ -180,6 +180,7 @@ async def crawl_once(
     for forum_id in forum_ids:
         forum_key = str(forum_id)
         before = state.forums.get(forum_key, ForumCursor())
+        forum_metadata_hold_page: int | None = None
 
         first_url = parser.forum_url(forum_id, 1)
         first_html = await parser.get_html(first_url)
@@ -234,9 +235,14 @@ async def crawl_once(
                             torrent_status = "magnet_deferred"
                             metadata_stats["deferred"] += 1
                             # Page 1 is always revisited. A deep page is not, so
-                            # do not let its cursor move past deferred metadata.
+                            # pin only this forum to the exact page that still
+                            # needs metadata instead of rolling every forum back.
                             if page != 1:
-                                metadata_cursor_blocked = True
+                                forum_metadata_hold_page = (
+                                    page
+                                    if forum_metadata_hold_page is None
+                                    else max(forum_metadata_hold_page, page)
+                                )
                         else:
                             was_pending = info_hash in next_metadata_pending
                             metadata_attempted = True
@@ -268,7 +274,11 @@ async def crawl_once(
                                     torrent_status = "torrent_metainfo_replay_pending"
                                     metadata_stats["replay_pending"] += 1
                                     if page != 1:
-                                        metadata_cursor_blocked = True
+                                        forum_metadata_hold_page = (
+                                            page
+                                            if forum_metadata_hold_page is None
+                                            else max(forum_metadata_hold_page, page)
+                                        )
                             except Exception as exc:
                                 book.torrent = torrent_ref
                                 torrent_status = "magnet_fallback"
@@ -279,7 +289,11 @@ async def crawl_once(
                                 # succeed. A first-time failure stays magnet-only
                                 # and does not permanently wedge the whole crawl.
                                 if was_pending and page != 1:
-                                    metadata_cursor_blocked = True
+                                    forum_metadata_hold_page = (
+                                        page
+                                        if forum_metadata_hold_page is None
+                                        else max(forum_metadata_hold_page, page)
+                                    )
                     elif download_torrents:
                         metadata_attempted = True
                         try:
@@ -342,22 +356,29 @@ async def crawl_once(
             break
 
         if advance_cursor:
-            next_forums[forum_key] = ForumCursor(
-                deep_page=next_deep,
-                last_page=last_page,
-                backfill_complete=backfill_complete,
-            )
+            if forum_metadata_hold_page is not None:
+                metadata_blocked_forums.add(forum_key)
+                next_forums[forum_key] = ForumCursor(
+                    deep_page=forum_metadata_hold_page,
+                    last_page=last_page,
+                    backfill_complete=False,
+                )
+            else:
+                next_forums[forum_key] = ForumCursor(
+                    deep_page=next_deep,
+                    last_page=last_page,
+                    backfill_complete=backfill_complete,
+                )
 
     cursor_held_for_metadata = bool(
-        advance_cursor and torrserver is not None and metadata_cursor_blocked
+        advance_cursor and torrserver is not None and metadata_blocked_forums
     )
 
-    # Truncated/manual probes are non-persistent. A scheduled metadata hold is
-    # different: keep the forum cursors in place but preserve successful
-    # metadata state so the next run can skip/confirm already processed hashes.
-    if truncated or not advance_cursor or cursor_held_for_metadata:
-        next_forums = dict(state.forums)
+    # Truncated/manual probes are non-persistent. Metadata holds are persisted
+    # per forum at the exact deep page that needs replay, while other forums
+    # are allowed to advance normally.
     if truncated or not advance_cursor:
+        next_forums = dict(state.forums)
         next_metadata_hashes = set(state.torrent_metadata_hashes)
         next_metadata_pending = dict(state.torrent_metadata_pending)
 
