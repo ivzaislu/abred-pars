@@ -1,20 +1,20 @@
 # Abred Catalog Pipeline
 
-Standalone catalog crawler/parser/feed producer for AudioBookRed.
+Отдельный crawler/parser/feed producer для AudioBookRed.
 
-Current package version: `0.1.3`.
+Текущая версия пакета: `0.1.3`.
 
-Producer does not connect to production PostgreSQL and emits source-native feed artifacts for Backend import.
+Producer не подключается к production PostgreSQL и публикует source-native feed artifacts, которые Backend отдельно валидирует и импортирует.
 
 ## Audiopolka
 
 Workflow: `.github/workflows/audiopolka.yml`.
 
-Current schedule: every hour at `:17 UTC`.
+Расписание: каждый час в `:17 UTC`.
 
-The workflow runs tests, crawls Audiopolka, uploads `feed.json` + `manifest.json`, and only then persists cursor state. Artifact publication must happen before cursor advancement so a failed upload cannot silently skip a cursor window.
+Порядок run: тесты → crawl → `feed.json`/`manifest.json` → upload artifact → сохранение cursor state. Artifact публикуется до cursor commit, чтобы не потерять диапазон при ошибке upload.
 
-Local run:
+Локальный запуск:
 
 ```bash
 python -m abred_catalog_pipeline run-audiopolka \
@@ -26,56 +26,40 @@ python -m abred_catalog_pipeline run-audiopolka \
 
 Workflow: `.github/workflows/rutracker.yml`.
 
-Current schedule: every 2 hours at `:47 UTC`.
+Расписание: каждые 2 часа в `:47 UTC`.
 
-All RuTracker HTTP traffic goes through the project Worker. Scheduled production runs use TorrServer enrichment to resolve torrent transport into concrete files and chapters.
+Весь HTTP-трафик к RuTracker идёт через project Worker. Scheduled runs используют TorrServer enrichment для получения torrent files и chapters.
 
-Manual bounded probe:
+Правила ошибок:
 
-```bash
-python -m abred_catalog_pipeline run-rutracker \
-  --forums 2387 \
-  --max-topics 5 \
-  --state state/rutracker.json \
-  --out artifacts
-```
+- `unsupported audio` — permanent reject и не удерживает cursor;
+- временные network/Worker/TorrServer ошибки остаются blocking;
+- HTTP `429`, `5xx` и transport errors имеют bounded retry;
+- обычные non-retriable `4xx` завершаются без retry.
 
-A truncated `--max-topics` run never advances cursors.
+RuTracker workflow также публикует artifact до сохранения cursor/TorrServer state.
 
-RuTracker failure semantics:
-
-- deterministic unsupported-audio rejects do not hold the cursor;
-- transient network, Worker, mapping and chapter failures remain blocking;
-- transport errors, HTTP 429 and 5xx use bounded retry;
-- ordinary non-retriable 4xx responses fail immediately.
-
-Scheduled runs upload the artifact before persisting cursor/TorrServer state.
-
-## Feed bundle
-
-Every successful run writes:
+## State
 
 ```text
-artifacts/<run-id>/feed.json
-artifacts/<run-id>/manifest.json
+state/audiopolka.json
+state/rutracker.json
 ```
 
-`manifest.json` contains SHA-256 and exact byte size of canonical `feed.json`.
+Пустой state означает полный bootstrap с нуля. Для RuTracker это также означает повторный сбор TorrServer metadata cache.
 
-GitHub Actions artifacts are named:
+## Feed artifacts
 
 ```text
 audiopolka-feed-<github-run-id>
 rutracker-feed-<github-run-id>
 ```
 
-Production Backend `ivzaislu/abred` validates and imports these artifacts through per-source `app.feed_auto` state. Producer never writes directly to Backend production DB.
+Backend `ivzaislu/abred` импортирует их через per-source `app.feed_auto`. Producer напрямую в production DB не пишет.
 
-## Tests
+## Тесты
 
 ```bash
 pip install -e '.[test]'
 pytest -q
 ```
-
-Workflow runs execute tests before crawling/publishing.
