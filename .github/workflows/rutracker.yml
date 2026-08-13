@@ -24,7 +24,7 @@ on:
         default: false
         type: boolean
       torrserver_enrich:
-        description: "Enrich unconfirmed magnet/info_hash records through TorrServer"
+        description: "Enrich every RuTracker info_hash through TorrServer and build chapters"
         required: false
         default: true
         type: boolean
@@ -52,15 +52,15 @@ env:
   TORRSERVER_URL: ${{ vars.TORRSERVER_URL }}
   TORRSERVER_USERNAME: ${{ secrets.TORRSERVER_USERNAME }}
   TORRSERVER_PASSWORD: ${{ secrets.TORRSERVER_PASSWORD }}
-  TORRSERVER_MAX_NEW: ${{ vars.TORRSERVER_MAX_NEW || '100' }}
+  TORRSERVER_MAX_NEW: '0'
   TORRSERVER_TIMEOUT_SECONDS: ${{ vars.TORRSERVER_TIMEOUT_SECONDS || '30' }}
   TORRSERVER_POLL_INTERVAL_SECONDS: ${{ vars.TORRSERVER_POLL_INTERVAL_SECONDS || '1' }}
-  TORRSERVER_REPLAY_SUCCESSES: ${{ vars.TORRSERVER_REPLAY_SUCCESSES || '2' }}
+  TORRSERVER_REPLAY_SUCCESSES: '1'
 
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v4
         with:
@@ -97,7 +97,7 @@ jobs:
           if [[ "$use_torrserver" == "true" ]]; then
             test -n "$TORRSERVER_URL" || { echo "Missing Actions variable TORRSERVER_URL"; exit 1; }
             echo "TorrServer URL configured"
-            echo "TorrServer max requests: $TORRSERVER_MAX_NEW"
+            echo "TorrServer max unconfirmed hashes: $TORRSERVER_MAX_NEW (0 = unlimited)"
             echo "TorrServer timeout: ${TORRSERVER_TIMEOUT_SECONDS}s"
             echo "TorrServer replay successes: $TORRSERVER_REPLAY_SUCCESSES"
           fi
