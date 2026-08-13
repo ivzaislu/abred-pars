@@ -332,6 +332,10 @@ async def crawl_once(
                                     f"magnet/TorrServer info_hash mismatch: "
                                     f"{torrent_ref.info_hash} != {torrent.info_hash}"
                                 )
+                            if not any(item.media_type == "audio" for item in torrent.files):
+                                raise _PermanentTopicReject(
+                                    f"RuTracker torrent metadata has no supported audio files: {book.external_url}"
+                                )
                             book = hydrate_book_from_torrent(book, torrent)
                             _assert_torrserver_ready(book)
                             metadata_stats["enriched"] += 1
