@@ -1,6 +1,122 @@
 {
   "source": "rutracker",
-  "forums": {},
+  "forums": {
+    "399": {
+      "deep_page": 162,
+      "last_page": 162,
+      "backfill_complete": false
+    },
+    "400": {
+      "deep_page": 64,
+      "last_page": 65,
+      "backfill_complete": false
+    },
+    "402": {
+      "deep_page": 174,
+      "last_page": 174,
+      "backfill_complete": false
+    },
+    "403": {
+      "deep_page": 48,
+      "last_page": 48,
+      "backfill_complete": false
+    },
+    "467": {
+      "deep_page": 148,
+      "last_page": 148,
+      "backfill_complete": false
+    },
+    "490": {
+      "deep_page": 107,
+      "last_page": 107,
+      "backfill_complete": false
+    },
+    "499": {
+      "deep_page": 130,
+      "last_page": 130,
+      "backfill_complete": false
+    },
+    "530": {
+      "deep_page": 9,
+      "last_page": 9,
+      "backfill_complete": false
+    },
+    "574": {
+      "deep_page": 60,
+      "last_page": 61,
+      "backfill_complete": false
+    },
+    "661": {
+      "deep_page": 211,
+      "last_page": 211,
+      "backfill_complete": false
+    },
+    "695": {
+      "deep_page": 13,
+      "last_page": 13,
+      "backfill_complete": false
+    },
+    "716": {
+      "deep_page": 20,
+      "last_page": 20,
+      "backfill_complete": false
+    },
+    "1036": {
+      "deep_page": 53,
+      "last_page": 54,
+      "backfill_complete": false
+    },
+    "1350": {
+      "deep_page": 14,
+      "last_page": 14,
+      "backfill_complete": false
+    },
+    "2127": {
+      "deep_page": 23,
+      "last_page": 24,
+      "backfill_complete": false
+    },
+    "2137": {
+      "deep_page": 139,
+      "last_page": 139,
+      "backfill_complete": false
+    },
+    "2152": {
+      "deep_page": 20,
+      "last_page": 20,
+      "backfill_complete": false
+    },
+    "2165": {
+      "deep_page": 46,
+      "last_page": 46,
+      "backfill_complete": false
+    },
+    "2325": {
+      "deep_page": 29,
+      "last_page": 29,
+      "backfill_complete": false
+    },
+    "2342": {
+      "deep_page": 2,
+      "last_page": 2,
+      "backfill_complete": false
+    },
+    "2348": {
+      "deep_page": 15,
+      "last_page": 16,
+      "backfill_complete": false
+    },
+    "2387": {
+      "deep_page": 394,
+      "last_page": 395,
+      "backfill_complete": false
+    },
+    "2388": {
+      "deep_page": 116,
+      "last_page": 117,
+      "backfill_complete": false
+    }
+  },
   "torrent_metadata_hashes": [
     "006fd3d9617816054901374a40d6116a5c9b1e8b",
     "00a5fd1be4fff839caf4bdd79fae3541cd2e8fa4",
@@ -667,6 +783,7 @@
     "a7870b89b217366bc41a74974136af32676121e7",
     "a7c06dcd9a56e73d231afa2b9b8355abba910dc8",
     "a80e648367833b7c7d0bb84e1423dbfa98e69420",
+    "a8137a642a1c926f42f43c3847bdf16a51dc3c69",
     "a8e4e96ca92e6867b0f52c7c06e6b9ea34f3d327",
     "a8f896fb16f2c135581f9a045e122882be7cec52",
     "a9432200f8efd458eea3ca2fc23f5a17ee68f411",
@@ -1880,7 +1997,6 @@
     "a775332570b5e0617357c1ab58a460fea2b3453d": 1,
     "a7aa5e069d0f467b3c0b8e142b3ef21cd627dc49": 1,
     "a7b26866385a930fec7ba6ed3db77e8322052af2": 1,
-    "a8137a642a1c926f42f43c3847bdf16a51dc3c69": 1,
     "a855837de0134ba1f52fcd03ddd447bb7904c434": 1,
     "a867ce4dda66a5c00d7613a3f19c003b0f8f8a76": 1,
     "a8911012c670fc4c9901cab298fdd054d361ff3d": 1,
