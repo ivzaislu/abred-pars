@@ -31,7 +31,7 @@ on:
       torrserver_max_new:
         description: "Max unconfirmed hashes to ask TorrServer for in this run; 0 = unlimited"
         required: false
-        default: "100"
+        default: "0"
         type: string
   schedule:
     # Every 2 hours at :47 UTC, staggered after Audiopolka.
