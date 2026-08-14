@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "abred-catalog-pipeline"
-version = "0.1.3"
+version = "0.1.4"
 description = "GitHub-hosted catalog crawler/parser/feed pipeline for Abred"
 requires-python = ">=3.12"
 dependencies = [

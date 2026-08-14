@@ -1,21 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from ..cursor import plan_pages
-from ..models import ParsedTorrent, book_to_feed_record
+from ..models import ParsedBook, ParsedTorrent, book_to_feed_record
 from .parser import (
     DEFAULT_AUDIOBOOK_FORUM_IDS,
     RuTrackerWorkerClient,
+    TrackerRow,
     detect_last_forum_page,
     hydrate_book_from_torrent,
     parse_forum_html,
     parse_topic_html,
     parse_torrent_bytes,
 )
-from .torrserver import TorrServerClient
+from .torrserver import TorrServerClient, TorrServerPool
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +147,7 @@ class _PermanentTopicReject(RuntimeError):
     """Content is permanently non-playable and must not freeze a forum cursor."""
 
 
-def _assert_torrserver_ready(book) -> None:
+def _assert_torrserver_ready(book: ParsedBook) -> None:
     torrent = book.torrent
     if torrent is None or not torrent.info_hash:
         raise RuntimeError("topic has no usable info_hash")
@@ -180,6 +182,64 @@ def _assert_torrserver_ready(book) -> None:
             )
 
 
+def _append_record(
+    records: list[dict],
+    *,
+    book: ParsedBook,
+    row: TrackerRow,
+    forum_key: str,
+    torrent_status: str,
+    metadata_attempted: bool,
+    torrent_error: str = "",
+) -> None:
+    if not book.torrent or not book.torrent.info_hash:
+        raise RuntimeError("topic has no usable info_hash")
+    record = book_to_feed_record(book, source="rutracker")
+    record["rutracker"] = {
+        "forum_id": row.forum_id or forum_key,
+        "forum_name": row.forum_name,
+        "seeders": row.seeders,
+        "leechers": row.leechers,
+        "listed_size_bytes": row.size_bytes,
+        "torrent_metadata_status": torrent_status,
+        "torrent_metadata_attempted": metadata_attempted,
+        "torrent_metadata_error": torrent_error or None,
+    }
+    if book.series_entries and record.get("series"):
+        record["series"][0]["entries"] = [
+            asdict(entry)
+            for entry in book.series_entries
+        ]
+    records.append(record)
+
+
+def _append_rejection(rejected: list[dict], row: TrackerRow, exc: Exception) -> None:
+    permanent_reject = isinstance(exc, _PermanentTopicReject)
+    rejected.append({
+        "source": "rutracker",
+        "external_id": row.topic_id,
+        "external_url": row.topic_url,
+        "reason": (
+            "rutracker_unsupported_audio"
+            if permanent_reject
+            else "rutracker_topic_rejected"
+        ),
+        "detail": str(exc)[:500],
+        "non_blocking": permanent_reject,
+    })
+
+
+@dataclass(slots=True)
+class _PendingMetadata:
+    row: TrackerRow
+    page: int
+    book: ParsedBook
+    torrent_ref: ParsedTorrent
+    info_hash: str
+    was_known: bool
+    task: asyncio.Task[ParsedTorrent]
+
+
 async def crawl_once(
     parser: RuTrackerWorkerClient,
     state: RuTrackerState,
@@ -188,7 +248,7 @@ async def crawl_once(
     backfill_pages: int = 1,
     max_topics: int = 0,
     download_torrents: bool = False,
-    torrserver: TorrServerClient | None = None,
+    torrserver: TorrServerClient | TorrServerPool | None = None,
     torrserver_max_new: int = 0,
     torrserver_replay_successes: int = 1,
     advance_cursor: bool = True,
@@ -208,8 +268,9 @@ async def crawl_once(
     metadata_blocked_forums: set[str] = set()
     torrserver_max_new = max(0, int(torrserver_max_new or 0))
     torrserver_replay_successes = max(1, int(torrserver_replay_successes or 1))
+    metadata_parallelism = max(1, min(2, int(getattr(torrserver, "size", 1) or 1)))
     unconfirmed_attempted = 0
-    metadata_stats = {
+    metadata_stats: dict = {
         "attempted": 0,
         "enriched": 0,
         "confirmed": 0,
@@ -217,6 +278,8 @@ async def crawl_once(
         "known": 0,
         "deferred": 0,
         "failed": 0,
+        "servers": [],
+        "failovers": 0,
     }
 
     for forum_id in forum_ids:
@@ -224,6 +287,80 @@ async def crawl_once(
         before = state.forums.get(forum_key, ForumCursor())
         forum_metadata_hold_page: int | None = None
         forum_metadata_blocked = False
+        active_metadata_tasks: dict[str, asyncio.Task[ParsedTorrent]] = {}
+
+        async def finish_metadata(item: _PendingMetadata) -> None:
+            nonlocal forum_metadata_hold_page, forum_metadata_blocked
+            try:
+                torrent = await item.task
+                if active_metadata_tasks.get(item.info_hash) is item.task:
+                    active_metadata_tasks.pop(item.info_hash, None)
+                torrent.torrent_url = (
+                    item.row.torrent_url
+                    or parser.torrent_url(item.row.topic_id)
+                )
+                torrent.seeders = item.row.seeders
+                torrent.leechers = item.row.leechers
+                if item.torrent_ref.info_hash and torrent.info_hash != item.info_hash:
+                    raise RuntimeError(
+                        "magnet/TorrServer info_hash mismatch: "
+                        f"{item.torrent_ref.info_hash} != {torrent.info_hash}"
+                    )
+                if not any(entry.media_type == "audio" for entry in torrent.files):
+                    raise _PermanentTopicReject(
+                        "RuTracker torrent metadata has no supported audio files: "
+                        f"{item.book.external_url}"
+                    )
+                book = hydrate_book_from_torrent(item.book, torrent)
+                _assert_torrserver_ready(book)
+                metadata_stats["enriched"] += 1
+
+                if item.was_known:
+                    torrent_status = "torrent_metadata_known"
+                    metadata_stats["known"] += 1
+                else:
+                    successes = next_metadata_pending.get(item.info_hash, 0) + 1
+                    if successes >= torrserver_replay_successes:
+                        next_metadata_pending.pop(item.info_hash, None)
+                        next_metadata_hashes.add(item.info_hash)
+                        torrent_status = "torrent_metainfo_confirmed"
+                        metadata_stats["confirmed"] += 1
+                    else:
+                        next_metadata_pending[item.info_hash] = successes
+                        torrent_status = "torrent_metainfo_replay_pending"
+                        metadata_stats["replay_pending"] += 1
+                        if item.page != 1:
+                            forum_metadata_hold_page = _held_page(
+                                forum_metadata_hold_page,
+                                item.page,
+                            )
+
+                _append_record(
+                    records,
+                    book=book,
+                    row=item.row,
+                    forum_key=forum_key,
+                    torrent_status=torrent_status,
+                    metadata_attempted=True,
+                )
+            except _PermanentTopicReject as exc:
+                metadata_stats["failed"] += 1
+                _append_rejection(rejected, item.row, exc)
+            except Exception as exc:
+                metadata_stats["failed"] += 1
+                forum_metadata_blocked = True
+                if item.page != 1:
+                    forum_metadata_hold_page = _held_page(
+                        forum_metadata_hold_page,
+                        item.page,
+                    )
+                _append_rejection(
+                    rejected,
+                    item.row,
+                    RuntimeError(
+                        f"TorrServer metadata is required for RuTracker feed: {exc}"
+                    ),
+                )
 
         first_url = parser.forum_url(forum_id, 1)
         first_html = await parser.get_html(first_url)
@@ -255,6 +392,8 @@ async def crawl_once(
                 else await parser.get_html(parser.forum_url(forum_id, page))
             )
             rows = parse_forum_html(html, parser.base_url, forum_id)
+            pending_metadata: list[_PendingMetadata] = []
+
             for row in rows:
                 if row.topic_id in seen_topics:
                     continue
@@ -262,7 +401,10 @@ async def crawl_once(
                     truncated = True
                     break
                 seen_topics.add(row.topic_id)
+
                 try:
+                    # RuTracker/Worker HTTP remains sequential. Only metadata
+                    # resolution below is overlapped between up to two workers.
                     topic_html = await parser.get_html(parser.topic_url(row.topic_id))
                     book = parse_topic_html(
                         topic_html,
@@ -278,11 +420,7 @@ async def crawl_once(
                     if not torrent_ref.total_size_bytes and row.size_bytes:
                         torrent_ref.total_size_bytes = row.size_bytes
 
-                    torrent_status = "magnet"
-                    torrent_error = ""
-                    metadata_attempted = False
                     info_hash = (torrent_ref.info_hash or "").strip().lower()
-
                     if not info_hash:
                         forum_metadata_blocked = True
                         if page != 1:
@@ -294,7 +432,6 @@ async def crawl_once(
 
                     if torrserver is not None:
                         was_known = info_hash in next_metadata_hashes
-
                         if (
                             not was_known
                             and torrserver_max_new
@@ -311,70 +448,39 @@ async def crawl_once(
                                 "torrent metadata deferred by torrserver_max_new"
                             )
 
-                        metadata_attempted = True
                         metadata_stats["attempted"] += 1
                         if not was_known:
                             unconfirmed_attempted += 1
 
-                        try:
-                            torrent = await torrserver.ensure_metadata(
-                                info_hash,
-                                torrent_ref.magnet_uri,
+                        task = active_metadata_tasks.get(info_hash)
+                        if task is None:
+                            task = asyncio.create_task(
+                                torrserver.ensure_metadata(
+                                    info_hash,
+                                    torrent_ref.magnet_uri,
+                                )
                             )
-                            torrent.torrent_url = (
-                                row.torrent_url
-                                or parser.torrent_url(row.topic_id)
+                            active_metadata_tasks[info_hash] = task
+                        pending_metadata.append(
+                            _PendingMetadata(
+                                row=row,
+                                page=page,
+                                book=book,
+                                torrent_ref=torrent_ref,
+                                info_hash=info_hash,
+                                was_known=was_known,
+                                task=task,
                             )
-                            torrent.seeders = row.seeders
-                            torrent.leechers = row.leechers
-                            if torrent_ref.info_hash and torrent.info_hash != info_hash:
-                                raise RuntimeError(
-                                    f"magnet/TorrServer info_hash mismatch: "
-                                    f"{torrent_ref.info_hash} != {torrent.info_hash}"
-                                )
-                            if not any(item.media_type == "audio" for item in torrent.files):
-                                raise _PermanentTopicReject(
-                                    f"RuTracker torrent metadata has no supported audio files: {book.external_url}"
-                                )
-                            book = hydrate_book_from_torrent(book, torrent)
-                            _assert_torrserver_ready(book)
-                            metadata_stats["enriched"] += 1
+                        )
+                        if len(pending_metadata) >= metadata_parallelism:
+                            await finish_metadata(pending_metadata.pop(0))
+                        continue
 
-                            if was_known:
-                                torrent_status = "torrent_metadata_known"
-                                metadata_stats["known"] += 1
-                            else:
-                                successes = next_metadata_pending.get(info_hash, 0) + 1
-                                if successes >= torrserver_replay_successes:
-                                    next_metadata_pending.pop(info_hash, None)
-                                    next_metadata_hashes.add(info_hash)
-                                    torrent_status = "torrent_metainfo_confirmed"
-                                    metadata_stats["confirmed"] += 1
-                                else:
-                                    next_metadata_pending[info_hash] = successes
-                                    torrent_status = "torrent_metainfo_replay_pending"
-                                    metadata_stats["replay_pending"] += 1
-                                    if page != 1:
-                                        forum_metadata_hold_page = _held_page(
-                                            forum_metadata_hold_page,
-                                            page,
-                                        )
-                        except _PermanentTopicReject:
-                            metadata_stats["failed"] += 1
-                            raise
-                        except Exception as exc:
-                            metadata_stats["failed"] += 1
-                            forum_metadata_blocked = True
-                            if page != 1:
-                                forum_metadata_hold_page = _held_page(
-                                    forum_metadata_hold_page,
-                                    page,
-                                )
-                            raise RuntimeError(
-                                f"TorrServer metadata is required for RuTracker feed: {exc}"
-                            ) from exc
+                    torrent_status = "magnet"
+                    torrent_error = ""
+                    metadata_attempted = False
 
-                    elif download_torrents:
+                    if download_torrents:
                         metadata_attempted = True
                         try:
                             raw_torrent = await parser.get_torrent(
@@ -396,7 +502,7 @@ async def crawl_once(
                                 and torrent.info_hash != torrent_ref.info_hash
                             ):
                                 raise RuntimeError(
-                                    f"magnet/torrent info_hash mismatch: "
+                                    "magnet/torrent info_hash mismatch: "
                                     f"{torrent_ref.info_hash} != {torrent.info_hash}"
                                 )
                             book = hydrate_book_from_torrent(book, torrent)
@@ -410,40 +516,21 @@ async def crawl_once(
                     else:
                         book.torrent = torrent_ref
 
-                    if not book.torrent or not book.torrent.info_hash:
-                        raise RuntimeError("topic has no usable info_hash")
-
-                    record = book_to_feed_record(book, source="rutracker")
-                    record["rutracker"] = {
-                        "forum_id": row.forum_id or forum_key,
-                        "forum_name": row.forum_name,
-                        "seeders": row.seeders,
-                        "leechers": row.leechers,
-                        "listed_size_bytes": row.size_bytes,
-                        "torrent_metadata_status": torrent_status,
-                        "torrent_metadata_attempted": metadata_attempted,
-                        "torrent_metadata_error": torrent_error or None,
-                    }
-                    if book.series_entries and record.get("series"):
-                        record["series"][0]["entries"] = [
-                            asdict(entry)
-                            for entry in book.series_entries
-                        ]
-                    records.append(record)
+                    _append_record(
+                        records,
+                        book=book,
+                        row=row,
+                        forum_key=forum_key,
+                        torrent_status=torrent_status,
+                        metadata_attempted=metadata_attempted,
+                        torrent_error=torrent_error,
+                    )
                 except Exception as exc:
-                    permanent_reject = isinstance(exc, _PermanentTopicReject)
-                    rejected.append({
-                        "source": "rutracker",
-                        "external_id": row.topic_id,
-                        "external_url": row.topic_url,
-                        "reason": (
-                            "rutracker_unsupported_audio"
-                            if permanent_reject
-                            else "rutracker_topic_rejected"
-                        ),
-                        "detail": str(exc)[:500],
-                        "non_blocking": permanent_reject,
-                    })
+                    _append_rejection(rejected, row, exc)
+
+            while pending_metadata:
+                await finish_metadata(pending_metadata.pop(0))
+
             if truncated:
                 break
         if truncated:
@@ -470,6 +557,13 @@ async def crawl_once(
                     last_page=last_page,
                     backfill_complete=backfill_complete,
                 )
+
+    if torrserver is not None:
+        statistics = getattr(torrserver, "statistics", None)
+        if callable(statistics):
+            pool_stats = statistics()
+            metadata_stats["servers"] = list(pool_stats.get("servers") or [])
+            metadata_stats["failovers"] = int(pool_stats.get("failovers") or 0)
 
     cursor_held_for_metadata = bool(
         advance_cursor and torrserver is not None and metadata_blocked_forums

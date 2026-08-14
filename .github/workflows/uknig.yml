@@ -1,0 +1,120 @@
+name: Uknig catalog feed
+
+on:
+  workflow_dispatch:
+    inputs:
+      backfill_pages:
+        description: "Deep bootstrap pages per run in addition to page 1"
+        required: false
+        default: "5"
+        type: string
+      delay_seconds:
+        description: "Delay between Uknig HTTP requests"
+        required: false
+        default: "0.35"
+        type: string
+  # Schedule intentionally disabled until Backend 0.8.3.8.3 accepts source=uknig.
+
+permissions:
+  contents: write
+
+concurrency:
+  group: uknig-catalog-feed
+  cancel-in-progress: false
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: pip install -e '.[test]'
+
+      - name: Tests
+        run: pytest -q
+
+      - name: Crawl Uknig
+        shell: bash
+        run: |
+          python -m abred_catalog_pipeline.uknig \
+            --state state/uknig.json \
+            --out artifacts \
+            --backfill-pages "${{ inputs.backfill_pages }}" \
+            --delay "${{ inputs.delay_seconds }}" \
+            --run-id "uknig-${{ github.run_id }}" \
+            | tee uknig-result.json
+
+      - name: Audit feed contract
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          feeds = list(Path("artifacts").glob("*/feed.json"))
+          assert len(feeds) == 1, feeds
+          feed = json.loads(feeds[0].read_text(encoding="utf-8"))
+          assert feed["source"] == "uknig"
+          for record in feed["records"]:
+              assert record["chapters"], record["external_id"]
+              for chapter in record["chapters"]:
+                  media_url = chapter.get("media_url") or ""
+                  parsed = urlparse(media_url)
+                  assert parsed.scheme == "https", (record["external_id"], media_url)
+                  assert parsed.netloc == "uknig.com", (record["external_id"], media_url)
+                  assert " or " not in media_url and " " not in media_url, (record["external_id"], media_url)
+          print(json.dumps(feed["counts"], ensure_ascii=False, indent=2))
+          PY
+
+      # Artifact must exist before cursor state is committed. If upload fails,
+      # the repository state remains unchanged and the next run repeats safely.
+      - name: Upload feed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: uknig-feed-${{ github.run_id }}
+          path: |
+            artifacts/**/feed.json
+            artifacts/**/manifest.json
+            uknig-result.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Persist Uknig cursor state
+        shell: bash
+        run: |
+          if git diff --quiet -- state/uknig.json; then
+            echo "Uknig cursor state unchanged"
+            exit 0
+          fi
+          git config user.name "abred-catalog-bot"
+          git config user.email "abred-catalog-bot@users.noreply.github.com"
+          git add state/uknig.json
+          git commit -m "catalog: advance Uknig cursor"
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            if ! git rebase origin/main; then
+              echo "State conflict while rebasing Uknig state; refusing to overwrite remote state"
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "Push raced with another state update; retrying ($attempt/5)"
+            sleep $((attempt * 2))
+          done
+
+          echo "Failed to persist Uknig state after 5 attempts"
+          exit 1

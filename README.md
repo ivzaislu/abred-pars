@@ -2,10 +2,7 @@
 
 Отдельный crawler/parser/feed producer для AudioBookRed.
 
-Текущая версия пакета: `0.1.3`.
-Следующий patch: `0.1.4` — Uknig, dual-TorrServer RuTracker и исправление выбора обложек.
-
-Подробный план: [`PATCH_ROADMAP.md`](PATCH_ROADMAP.md).
+Текущая версия пакета: `0.1.4`.
 
 Producer не подключается к production PostgreSQL и публикует source-native feed artifacts, которые Backend отдельно валидирует и импортирует.
 
@@ -35,18 +32,49 @@ Workflow: `.github/workflows/rutracker.yml`.
 
 Весь HTTP-трафик к RuTracker идёт через project Worker. Scheduled runs используют TorrServer enrichment для получения torrent files и chapters.
 
+### Два TorrServer
+
+`0.1.4` поддерживает pool из двух TorrServer:
+
+```text
+TORRSERVER_URL
+TORRSERVER_URL_2
+TORRSERVER_USERNAME
+TORRSERVER_PASSWORD
+```
+
+`TORRSERVER_USERNAME` и `TORRSERVER_PASSWORD` общие для обоих серверов; отдельные credentials для второго сервера не нужны.
+
+Разные `info_hash` обрабатываются максимум двумя параллельными metadata jobs. Pool использует least-in-flight scheduling; один hash не отправляется одновременно на оба сервера. При timeout/network/HTTP `429`/`5xx` разрешён один последовательный failover на второй сервер. Structural metadata errors не failover'ятся и остаются blocking.
+
+В `crawl-result.json` доступны:
+
+```text
+torrent_metadata.servers[].attempted
+torrent_metadata.servers[].enriched
+torrent_metadata.servers[].failed
+torrent_metadata.failovers
+```
+
+RuTracker/Worker HTML-запросы при этом остаются последовательными — параллелится только TorrServer metadata enrichment.
+
 Правила ошибок:
 
 - `unsupported audio` — permanent reject и не удерживает cursor;
-- временные network/Worker/TorrServer ошибки остаются blocking;
-- HTTP `429`, `5xx` и transport errors имеют bounded retry;
-- обычные non-retriable `4xx` завершаются без retry.
+- временные network/Worker/TorrServer ошибки остаются blocking, если исчерпан retry/failover;
+- HTTP `429`, `5xx` и transport errors Worker имеют bounded retry;
+- обычные non-retriable `4xx` завершаются без retry;
+- structural TorrServer metadata failure остаётся blocking.
 
-RuTracker workflow также публикует artifact до сохранения cursor/TorrServer state.
+RuTracker workflow публикует artifact до сохранения cursor/TorrServer state.
 
-## Uknig — разработка `0.1.4`
+### Обложки RuTracker
 
-Uknig реализован отдельным source package `abred_catalog_pipeline.uknig`. На этапе canary автоматическое расписание не включается.
+`0.1.4` больше не принимает первую картинку post автоматически. Static assets, smiles, badges, маленькие изображения и явно широкие декоративные полосы отбрасываются. При доступных размерах предпочитается portrait/book-like aspect ratio; если безопасного кандидата нет, `cover_url` остаётся пустым.
+
+## Uknig
+
+Uknig реализован отдельным source package `abred_catalog_pipeline.uknig`.
 
 Каталог использует `https://uknig.com/?p=<N>`, stable source ID берётся из `/books/<id>`. Полная аудиокнига подтверждается только непустым full playlist `/index.php/books/<id>/playlist.txt`; наличие одного ознакомительного фрагмента недостаточно.
 
@@ -54,18 +82,20 @@ Uknig реализован отдельным source package `abred_catalog_pipe
 
 - `Прослушивание заблокировано правообладателем` → `rights_holder_blocked`, playable record не создаётся;
 - есть только ознакомительный фрагмент, но нет полного playlist → `preview_only`, playable record не создаётся;
-- в feed попадают только книги с непустым full playlist и валидными media URL.
+- в feed попадают только книги с непустым full playlist и валидными HTTPS media URL.
 
-Ручной canary:
+Canary workflow: `.github/workflows/uknig-canary.yml`.
+
+Production feed workflow: `.github/workflows/uknig.yml`. Он уже формирует `uknig-feed-<github-run-id>` и сохраняет `state/uknig.json` только после успешного upload artifact, но **пока доступен только вручную**. Cron намеренно не включён до production Backend `0.8.3.8.3` с поддержкой `source=uknig`.
+
+Ручной локальный запуск:
 
 ```bash
 python -m abred_catalog_pipeline.uknig \
   --state state/uknig.json \
   --out artifacts \
-  --backfill-pages 1
+  --backfill-pages 5
 ```
-
-Перед включением scheduled workflow обязательны fixture tests, небольшой live canary и ручной audit `feed.json`/media contract.
 
 ## State
 
@@ -82,7 +112,7 @@ state/uknig.json
 ```text
 audiopolka-feed-<github-run-id>
 rutracker-feed-<github-run-id>
-uknig-feed-<github-run-id>   # после включения workflow
+uknig-feed-<github-run-id>
 ```
 
 Backend `ivzaislu/abred` импортирует их через per-source `app.feed_auto`. Producer напрямую в production DB не пишет.

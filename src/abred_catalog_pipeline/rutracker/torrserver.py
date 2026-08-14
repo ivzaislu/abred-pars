@@ -4,6 +4,7 @@ import asyncio
 import re
 import time
 from pathlib import PurePosixPath
+from typing import Iterable
 
 import httpx
 
@@ -18,19 +19,22 @@ class TorrServerMetadataError(RuntimeError):
     pass
 
 
+class TorrServerTransientError(TorrServerMetadataError):
+    """Временная ошибка, для которой допустим один failover на другой сервер."""
+
+
 class TorrServerClient:
-    """Minimal metadata-only TorrServer client for a shared instance.
+    """Минимальный metadata-only клиент одного общего TorrServer.
 
-    The client never calls ``rem``, ``drop`` or ``wipe`` and never saves a
-    magnet to the TorrServer database. Missing magnets are added with
-    ``save_to_db=false`` and are left to TorrServer's own inactive-torrent
-    timeout. That avoids racing with another app that may start using the same
-    torrent while the GitHub job is resolving metadata.
+    Клиент никогда не вызывает ``rem``, ``drop`` или ``wipe`` и не сохраняет
+    magnet в базе TorrServer. Отсутствующий magnet добавляется с
+    ``save_to_db=false`` и остаётся под обычным inactive-torrent timeout самого
+    TorrServer. Это не создаёт гонку с другим приложением, которое может начать
+    использовать тот же torrent, пока GitHub job получает metadata.
 
-    TorrServer's public ``file_stats[].id`` is a one-based, path-sorted stream
-    id. Abred stores zero-based catalog file indexes, so feed indexes are the
-    zero-based position in ``file_stats``; playback later resolves the real
-    TorrServer stream id by the persisted file path.
+    Публичный ``file_stats[].id`` TorrServer — one-based stream id в сортировке
+    по path. В feed Abred хранится zero-based индекс позиции в ``file_stats``;
+    playback затем находит реальный stream id по сохранённому path.
     """
 
     def __init__(
@@ -149,7 +153,7 @@ class TorrServerClient:
 
             if time.monotonic() >= deadline:
                 suffix = f"; last_state={last_state}" if last_state else ""
-                raise TorrServerMetadataError(
+                raise TorrServerTransientError(
                     f"timeout waiting for torrent metadata: {expected_hash}{suffix}"
                 )
 
@@ -158,3 +162,141 @@ class TorrServerClient:
             else:
                 await asyncio.sleep(0)
             status = await self.get(expected_hash)
+
+
+def _is_transient_torrserver_error(exc: Exception) -> bool:
+    if isinstance(exc, TorrServerTransientError):
+        return True
+    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status == 429 or status >= 500
+    return False
+
+
+class TorrServerPool:
+    """Пул TorrServer с least-in-flight выбором и одним transient failover.
+
+    Одновременные разные ``info_hash`` распределяются по наименее занятым
+    серверам; при равной загрузке порядок стабильно определяется самим hash.
+    Один hash никогда не отправляется на два сервера одновременно. Только
+    timeout/network/HTTP 429/5xx разрешают один последовательный failover на
+    другой сервер. Structural metadata errors остаются blocking без failover.
+
+    Логин и пароль задаются один раз в ``from_urls`` и применяются ко всем
+    экземплярам. Пустые и повторяющиеся URL игнорируются; один URL сохраняет
+    полную обратную совместимость с прежней конфигурацией.
+    """
+
+    def __init__(self, clients: Iterable[TorrServerClient]):
+        self.clients = tuple(clients)
+        if not self.clients:
+            raise ValueError("at least one TorrServer client is required")
+        self._in_flight = [0 for _ in self.clients]
+        self._attempted = [0 for _ in self.clients]
+        self._enriched = [0 for _ in self.clients]
+        self._failed = [0 for _ in self.clients]
+        self._failovers = 0
+
+    @classmethod
+    def from_urls(
+        cls,
+        base_urls: Iterable[str],
+        *,
+        username: str = "",
+        password: str = "",
+        timeout_seconds: float = 30.0,
+        poll_interval_seconds: float = 1.0,
+    ) -> "TorrServerPool":
+        normalized: list[str] = []
+        for value in base_urls:
+            url = (value or "").strip().rstrip("/")
+            if url and url not in normalized:
+                normalized.append(url)
+        if not normalized:
+            raise ValueError("at least one TorrServer URL is required")
+        return cls(
+            TorrServerClient(
+                base_url=url,
+                username=username,
+                password=password,
+                timeout_seconds=timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+            )
+            for url in normalized
+        )
+
+    @property
+    def size(self) -> int:
+        return len(self.clients)
+
+    def _primary_index(self, info_hash: str, *, exclude: set[int] | None = None) -> int:
+        expected_hash = (info_hash or "").strip().lower()
+        if not _HEX40_RE.fullmatch(expected_hash):
+            raise TorrServerMetadataError(f"invalid info_hash: {info_hash!r}")
+        excluded = exclude or set()
+        available = [index for index in range(len(self.clients)) if index not in excluded]
+        if not available:
+            raise TorrServerMetadataError("no TorrServer instances available")
+        preferred = int(expected_hash[-8:], 16) % len(self.clients)
+        return min(
+            available,
+            key=lambda index: (
+                self._in_flight[index],
+                (index - preferred) % len(self.clients),
+            ),
+        )
+
+    async def _attempt(self, index: int, info_hash: str, magnet_uri: str) -> ParsedTorrent:
+        self._attempted[index] += 1
+        self._in_flight[index] += 1
+        try:
+            torrent = await self.clients[index].ensure_metadata(info_hash, magnet_uri)
+        except Exception:
+            self._failed[index] += 1
+            raise
+        else:
+            self._enriched[index] += 1
+            return torrent
+        finally:
+            self._in_flight[index] -= 1
+
+    async def ensure_metadata(self, info_hash: str, magnet_uri: str) -> ParsedTorrent:
+        first = self._primary_index(info_hash)
+        try:
+            return await self._attempt(first, info_hash, magnet_uri)
+        except Exception as first_exc:
+            if self.size < 2 or not _is_transient_torrserver_error(first_exc):
+                raise
+
+            second = self._primary_index(info_hash, exclude={first})
+            self._failovers += 1
+            try:
+                return await self._attempt(second, info_hash, magnet_uri)
+            except Exception as second_exc:
+                raise TorrServerMetadataError(
+                    "TorrServer failover exhausted for "
+                    f"{(info_hash or '').strip().lower()}: "
+                    f"primary={type(first_exc).__name__}: {first_exc}; "
+                    f"fallback={type(second_exc).__name__}: {second_exc}"
+                ) from second_exc
+
+    def statistics(self) -> dict:
+        return {
+            "servers": [
+                {
+                    "server": index + 1,
+                    "attempted": self._attempted[index],
+                    "enriched": self._enriched[index],
+                    "failed": self._failed[index],
+                    "in_flight": self._in_flight[index],
+                }
+                for index in range(self.size)
+            ],
+            "failovers": self._failovers,
+        }
+
+    async def aclose(self) -> None:
+        for client in self.clients:
+            await client.aclose()
