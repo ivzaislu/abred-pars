@@ -2,113 +2,125 @@
 
 `ivzaislu/abred-pars` — единственное место для массовых catalog crawler/parser/feed producer AudioBookRed. Backend `ivzaislu/abred` только валидирует и импортирует готовые artifacts.
 
-## Следующий patch: `0.1.4`
+## `0.1.4` — готово в `main`
 
-Порядок общего release train:
+Общий release train:
 
 ```text
-abred-pars 0.1.4
+abred-pars 0.1.4 — готово
 → Backend 0.8.3.8.3
 → Uknig production cutover
 → Android 0.5.3.6 / code 59
 ```
 
+Merge release PR #15: `136d13735decfed4a70c9de0f4eda15e6a71df0f`.
+
 ## Uknig
 
-### Уже готово в `main`
+Готово:
 
-Первый Uknig-компонент смёржен через PR #14:
-
-- parser и crawler для `https://uknig.com/`;
+- parser/crawler для `https://uknig.com/`;
 - stable source ID из `/books/<id>`;
 - pagination `/?p=<N>`;
-- metadata: title, description, cover, authors, narrators, genres, series/position, duration;
+- title, description, cover, authors, narrators, genres, series/position, duration;
 - full playlist `/index.php/books/<id>/playlist.txt` → chapters/media;
-- state `state/uknig.json`;
-- ручной CLI `python -m abred_catalog_pipeline.uknig`;
+- `state/uknig.json`;
+- ручной CLI;
 - unit/regression tests;
-- read-only live canary без persistent state и без schedule.
+- read-only live canary;
+- production artifact workflow `.github/workflows/uknig.yml` с порядком `tests → crawl → audit → artifact upload → state commit`.
 
 Жёсткие фильтры:
 
 - `Прослушивание заблокировано правообладателем` → `rights_holder_blocked`, playable record не создаётся;
-- страница только с ознакомительным фрагментом без `Полная версия аудиокниги` → `preview_only`, playable record не создаётся;
+- только ознакомительный фрагмент без полной версии → `preview_only`;
 - пустой/недоступный/невалидный full playlist → `preview_only`;
 - playlist вида `stream URL or download URL` нормализуется до одного HTTPS media URL.
 
-Live canary `31792720994` прошёл: текущая page 1 дала 24 playable records / 670 chapters, feed contract audit green; известная rights-holder-blocked книга была корректно отклонена.
-
-### Осталось до production producer
-
-- добавить production workflow/artifact `uknig-feed-<github-run-id>` с `feed.json`/`manifest.json`;
-- сохранять cursor/state только после успешного upload artifact;
-- выбрать безопасный bootstrap rate для каталога примерно в несколько тысяч страниц;
-- scheduled запуск включать только после готовности Backend `0.8.3.8.3` к `source=uknig`;
-- перед cutover повторить небольшой canary и ручной audit transport-контракта;
-- использовать только штатно доступные данные, без обхода авторизации/DRM/ограничений доступа.
+Uknig production workflow пока manual-only. Cron включается только после production Backend `0.8.3.8.3` с поддержкой `source=uknig` и успешного cutover canary.
 
 ## RuTracker: два TorrServer
 
-Перейти с одного TorrServer на pool из двух серверов для metadata enrichment.
+Готов pool из двух серверов:
 
-Требования:
+```text
+TORRSERVER_URL
+TORRSERVER_URL_2
+TORRSERVER_USERNAME
+TORRSERVER_PASSWORD
+```
 
-- разные `info_hash` обрабатываются параллельно двумя workers;
+`TORRSERVER_USERNAME` / `TORRSERVER_PASSWORD` общие для обоих TorrServer.
+
+Поведение:
+
+- до двух параллельных metadata jobs;
+- RuTracker/Worker HTML-запросы остаются последовательными;
+- least-in-flight scheduling распределяет разные `info_hash` между серверами;
 - один hash не отправляется одновременно на оба сервера;
-- deterministic round-robin или least-in-flight scheduling;
-- transient timeout/network/429/5xx допускает один failover на второй сервер;
-- permanent unsupported-audio остаётся non-blocking;
+- timeout/network/HTTP `429`/`5xx` допускают один последовательный failover;
 - structural metadata failure остаётся blocking;
-- существующие cursor/replay/confirmation semantics сохраняются;
-- в run statistics добавить per-server `attempted/enriched/failed` и общий `failovers`;
-- оба набора credentials хранятся только в Actions secrets/variables.
+- permanent unsupported-audio остаётся non-blocking;
+- cursor/replay/confirmation semantics сохранены;
+- run statistics содержат per-server `attempted/enriched/failed/in_flight` и общий `failovers`.
 
-## RuTracker: выбор обложки
+Live canary `31803496339`:
 
-Исправить `cover_url`: parser не должен автоматически считать первый `postImg`/`img` обложкой.
+```text
+records: 4
+server #1: attempted 2 / enriched 2 / failed 0
+server #2: attempted 2 / enriched 2 / failed 0
+failovers: 0
+```
 
-Нужно:
+## RuTracker: качество данных
 
-- отбрасывать static assets, smiles, badges и декоративные изображения;
-- учитывать размеры/aspect ratio, если они доступны;
-- предпочитать portrait/book-like кандидаты;
-- явно широкую низкую картинку не использовать как cover;
-- лучше вернуть пустой cover, чем ложную декоративную полоску;
-- добавить fixtures: обычная обложка, несколько картинок, горизонтальный декор перед обложкой, post без cover.
+### Обложки
 
-Android `0.5.3.6` отдельно добавит client-side fallback для аномального aspect ratio.
+Готов безопасный cover selector:
+
+- static assets, smiles, badges и маленькие изображения отбрасываются;
+- явно широкие декоративные изображения не становятся cover;
+- при известных размерах предпочитается portrait/book-like aspect ratio;
+- если безопасного кандидата нет, `cover_url` остаётся пустым;
+- fixture corpus покрывает обычную обложку, несколько картинок, широкий декор перед обложкой и post без cover.
+
+Android `0.5.3.6` дополнительно имеет client-side fallback для аномального aspect ratio.
+
+### `series_name`
+
+Исправлен production incident 2026-08-14: malformed RuTracker markup мог вложить следующие metadata-поля внутрь значения `Цикл/серия`, например:
+
+```text
+Перья Номер книги: 2 Жанр: ... Издательство: ... Описание: ...
+```
+
+Это приводило Backend к `StringDataRightTruncation` на `VARCHAR(512)` и блокировало automatic intake. Теперь parser заканчивает series field на следующем известном metadata-label и получает `series_name="Перья"`. Если значение остаётся аномально длинным и надёжно разделить его нельзя, серия отбрасывается вместо отправки структурно невалидной строки. Добавлен regression fixture на повреждённую вложенную разметку.
 
 ## State/artifact safety
 
-Для Audiopolka, RuTracker и Uknig сохраняем порядок:
+Для Audiopolka, RuTracker и Uknig сохраняется порядок:
 
 ```text
 tests → crawl → feed/manifest → upload artifact → save state
 ```
 
-Пустой state означает явный bootstrap с нуля. State не продвигается до успешной публикации artifact.
-
-## Документация и версия
-
-Перед release:
-
-- bump `0.1.3 → 0.1.4`;
-- обновить `README.md` и `CHANGELOG.md`;
-- описать Uknig workflow/state/artifact;
-- описать dual-TorrServer config и статистику;
-- вся актуальная документация остаётся на русском языке.
+State не продвигается до успешной публикации artifact.
 
 ## Release gate `0.1.4`
+
+Выполнено:
 
 ```text
 pytest green
 → Audiopolka regression green
 → RuTracker regression green
 → Uknig canary green
-→ dual TorrServer canary использует оба сервера
+→ dual TorrServer live canary использует оба сервера
 → cover fixture corpus green
+→ malformed series_name regression green
 → artifact публикуется до state commit
 → README/CHANGELOG синхронизированы
 ```
 
-После этого Backend `0.8.3.8.3` может включать Uknig feed contract и проводить production cutover.
+Следующий этап общего release train — Backend `0.8.3.8.3`, затем Uknig production cutover.
