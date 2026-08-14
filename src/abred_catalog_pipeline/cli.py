@@ -14,7 +14,7 @@ from .cursor import CrawlCursor, plan_pages
 from .feed import write_feed_bundle
 from .rutracker.crawler import RuTrackerState, crawl_once as crawl_rutracker_once, parse_forum_ids
 from .rutracker.parser import RuTrackerWorkerClient
-from .rutracker.torrserver import TorrServerClient
+from .rutracker.torrserver import TorrServerPool
 
 
 def _run_id() -> str:
@@ -62,8 +62,16 @@ async def _run_audiopolka(args: argparse.Namespace) -> int:
 async def _run_rutracker(args: argparse.Namespace) -> int:
     if args.torrserver_enrich and args.download_torrents:
         raise SystemExit("--torrserver-enrich and --download-torrents are mutually exclusive")
-    if args.torrserver_enrich and not (args.torrserver_url or "").strip():
-        raise SystemExit("--torrserver-enrich requires --torrserver-url or TORRSERVER_URL")
+    torrserver_urls = [
+        value.strip()
+        for value in (args.torrserver_url, args.torrserver_url_2)
+        if (value or "").strip()
+    ]
+    if args.torrserver_enrich and not torrserver_urls:
+        raise SystemExit(
+            "--torrserver-enrich requires --torrserver-url/--torrserver-url-2 "
+            "or TORRSERVER_URL/TORRSERVER_URL_2"
+        )
 
     cursor_path = Path(args.state)
     cursor = RuTrackerState.load(cursor_path)
@@ -78,8 +86,8 @@ async def _run_rutracker(args: argparse.Namespace) -> int:
     )
     torrserver = None
     if args.torrserver_enrich:
-        torrserver = TorrServerClient(
-            base_url=args.torrserver_url,
+        torrserver = TorrServerPool.from_urls(
+            torrserver_urls,
             username=args.torrserver_username,
             password=args.torrserver_password,
             timeout_seconds=args.torrserver_timeout,
@@ -197,9 +205,10 @@ def build_parser() -> argparse.ArgumentParser:
     rt.add_argument(
         "--torrserver-enrich",
         action="store_true",
-        help="enrich new RuTracker info hashes through TorrServer using magnet metadata",
+        help="enrich RuTracker info hashes through one or two TorrServer instances",
     )
     rt.add_argument("--torrserver-url", default=os.environ.get("TORRSERVER_URL", ""))
+    rt.add_argument("--torrserver-url-2", default=os.environ.get("TORRSERVER_URL_2", ""))
     rt.add_argument("--torrserver-username", default=os.environ.get("TORRSERVER_USERNAME", ""))
     rt.add_argument("--torrserver-password", default=os.environ.get("TORRSERVER_PASSWORD", ""))
     rt.add_argument(
