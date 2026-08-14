@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from ..models import AudiobookSource, ParsedBook, ParsedChapter, PreviewOnlyBookError, UnavailableBookError
 
 _BOOK_RE = re.compile(r"(?:^|/)books/(\d+)(?:/|$)")
+_MEDIA_URL_RE = re.compile(r"https?://[^\s]+", re.I)
 _RIGHTS_BLOCKED = "прослушивание заблокировано правообладателем"
 
 
@@ -21,6 +22,22 @@ def _clean(value: str) -> str:
 def _book_id(value: str) -> str:
     match = _BOOK_RE.search(urlparse(value).path)
     return match.group(1) if match else ""
+
+
+def _media_url(value: object) -> str:
+    """Return the primary playable URL from Uknig's playlist field.
+
+    Some playlist rows expose `stream URL or download URL`. The feed contract
+    accepts one URL only, so prefer the first valid HTTP(S) candidate and keep
+    the `?d=1` alternative out of playback metadata.
+    """
+    raw = str(value or "").strip()
+    for candidate in _MEDIA_URL_RE.findall(raw):
+        candidate = candidate.rstrip(".,;)")
+        parsed = urlparse(candidate)
+        if parsed.scheme.casefold() in {"http", "https"} and parsed.netloc:
+            return candidate
+    return ""
 
 
 def _duration_seconds(value: str) -> int:
@@ -196,7 +213,7 @@ def parse_playlist_json(payload: object, book_url: str) -> list[ParsedChapter]:
     for position, item in enumerate(payload, start=1):
         if not isinstance(item, dict):
             continue
-        media_url = _clean(str(item.get("file") or ""))
+        media_url = _media_url(item.get("file"))
         external_id = _clean(str(item.get("id") or ""))
         if not media_url or not external_id:
             continue
