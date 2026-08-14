@@ -4,6 +4,7 @@ import asyncio
 import re
 import time
 from pathlib import PurePosixPath
+from typing import Iterable
 
 import httpx
 
@@ -19,18 +20,17 @@ class TorrServerMetadataError(RuntimeError):
 
 
 class TorrServerClient:
-    """Minimal metadata-only TorrServer client for a shared instance.
+    """Минимальный metadata-only клиент одного общего TorrServer.
 
-    The client never calls ``rem``, ``drop`` or ``wipe`` and never saves a
-    magnet to the TorrServer database. Missing magnets are added with
-    ``save_to_db=false`` and are left to TorrServer's own inactive-torrent
-    timeout. That avoids racing with another app that may start using the same
-    torrent while the GitHub job is resolving metadata.
+    Клиент никогда не вызывает ``rem``, ``drop`` или ``wipe`` и не сохраняет
+    magnet в базе TorrServer. Отсутствующий magnet добавляется с
+    ``save_to_db=false`` и остаётся под обычным inactive-torrent timeout самого
+    TorrServer. Это не создаёт гонку с другим приложением, которое может начать
+    использовать тот же torrent, пока GitHub job получает metadata.
 
-    TorrServer's public ``file_stats[].id`` is a one-based, path-sorted stream
-    id. Abred stores zero-based catalog file indexes, so feed indexes are the
-    zero-based position in ``file_stats``; playback later resolves the real
-    TorrServer stream id by the persisted file path.
+    Публичный ``file_stats[].id`` TorrServer — one-based stream id в сортировке
+    по path. В feed Abred хранится zero-based индекс позиции в ``file_stats``;
+    playback затем находит реальный stream id по сохранённому path.
     """
 
     def __init__(
@@ -158,3 +158,77 @@ class TorrServerClient:
             else:
                 await asyncio.sleep(0)
             status = await self.get(expected_hash)
+
+
+class TorrServerPool:
+    """Пул TorrServer для стабильного распределения metadata-запросов.
+
+    Основной сервер выбирается детерминированно по ``info_hash``. При двух
+    серверах это распределяет разные torrents между обоими, не требуя общего
+    состояния. Если выбранный сервер не смог вернуть metadata, тот же запрос
+    последовательно пробуется на остальных серверах пула.
+
+    Логин и пароль задаются один раз в ``from_urls`` и применяются ко всем
+    экземплярам. Пустые и повторяющиеся URL игнорируются; один URL сохраняет
+    полную обратную совместимость с прежней конфигурацией.
+    """
+
+    def __init__(self, clients: Iterable[TorrServerClient]):
+        self.clients = tuple(clients)
+        if not self.clients:
+            raise ValueError("at least one TorrServer client is required")
+
+    @classmethod
+    def from_urls(
+        cls,
+        base_urls: Iterable[str],
+        *,
+        username: str = "",
+        password: str = "",
+        timeout_seconds: float = 30.0,
+        poll_interval_seconds: float = 1.0,
+    ) -> "TorrServerPool":
+        normalized: list[str] = []
+        for value in base_urls:
+            url = (value or "").strip().rstrip("/")
+            if url and url not in normalized:
+                normalized.append(url)
+        if not normalized:
+            raise ValueError("at least one TorrServer URL is required")
+        return cls(
+            TorrServerClient(
+                base_url=url,
+                username=username,
+                password=password,
+                timeout_seconds=timeout_seconds,
+                poll_interval_seconds=poll_interval_seconds,
+            )
+            for url in normalized
+        )
+
+    @property
+    def size(self) -> int:
+        return len(self.clients)
+
+    def _ordered_clients(self, info_hash: str) -> tuple[TorrServerClient, ...]:
+        expected_hash = (info_hash or "").strip().lower()
+        if not _HEX40_RE.fullmatch(expected_hash):
+            raise TorrServerMetadataError(f"invalid info_hash: {info_hash!r}")
+        primary = int(expected_hash[-8:], 16) % len(self.clients)
+        return self.clients[primary:] + self.clients[:primary]
+
+    async def ensure_metadata(self, info_hash: str, magnet_uri: str) -> ParsedTorrent:
+        errors: list[str] = []
+        for attempt, client in enumerate(self._ordered_clients(info_hash), start=1):
+            try:
+                return await client.ensure_metadata(info_hash, magnet_uri)
+            except Exception as exc:
+                errors.append(f"server#{attempt}: {type(exc).__name__}: {exc}")
+        raise TorrServerMetadataError(
+            "all TorrServer instances failed for "
+            f"{(info_hash or '').strip().lower()}: " + " | ".join(errors)
+        )
+
+    async def aclose(self) -> None:
+        for client in self.clients:
+            await client.aclose()
