@@ -6,14 +6,16 @@ on:
       backfill_pages:
         description: "Deep bootstrap pages per run in addition to page 1"
         required: false
-        default: "5"
+        default: "20"
         type: string
       delay_seconds:
         description: "Delay between Uknig HTTP requests"
         required: false
         default: "0.35"
         type: string
-  # Schedule intentionally disabled until Backend 0.8.3.8.3 accepts source=uknig.
+  schedule:
+    # Every hour at :07 UTC, staggered before Audiopolka (:17).
+    - cron: "7 * * * *"
 
 permissions:
   contents: write
@@ -49,8 +51,8 @@ jobs:
           python -m abred_catalog_pipeline.uknig \
             --state state/uknig.json \
             --out artifacts \
-            --backfill-pages "${{ inputs.backfill_pages }}" \
-            --delay "${{ inputs.delay_seconds }}" \
+            --backfill-pages "${{ inputs.backfill_pages || '20' }}" \
+            --delay "${{ inputs.delay_seconds || '0.35' }}" \
             --run-id "uknig-${{ github.run_id }}" \
             | tee uknig-result.json
 
