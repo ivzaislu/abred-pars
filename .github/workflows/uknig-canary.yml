@@ -42,6 +42,7 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
+          from urllib.parse import urlparse
 
           feeds = list(Path("artifacts").glob("*/feed.json"))
           assert len(feeds) == 1, feeds
@@ -51,7 +52,12 @@ jobs:
           assert feed["records"], "canary produced no playable full books"
           for record in feed["records"]:
               assert record["chapters"], record["external_id"]
-              assert all(ch.get("media_url") for ch in record["chapters"]), record["external_id"]
+              for chapter in record["chapters"]:
+                  media_url = chapter.get("media_url") or ""
+                  parsed = urlparse(media_url)
+                  assert parsed.scheme == "https", (record["external_id"], media_url)
+                  assert parsed.netloc == "uknig.com", (record["external_id"], media_url)
+                  assert " or " not in media_url and " " not in media_url, (record["external_id"], media_url)
           print(json.dumps(feed["counts"], ensure_ascii=False, indent=2))
           PY
       - name: Upload canary artifact
