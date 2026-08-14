@@ -1,5 +1,18 @@
 # История изменений
 
+## 0.1.4
+
+- RuTracker metadata enrichment переведён на pool из `TORRSERVER_URL` + `TORRSERVER_URL_2` с общими `TORRSERVER_USERNAME` / `TORRSERVER_PASSWORD`.
+- Разные `info_hash` могут обрабатываться двумя параллельными metadata workers; RuTracker/Worker HTML остаётся последовательным.
+- Добавлен least-in-flight scheduling: один hash не отправляется одновременно на оба TorrServer.
+- Timeout/network/HTTP `429`/`5xx` допускают один последовательный failover на второй TorrServer; structural metadata errors остаются blocking без failover.
+- В статистику run добавлены per-server `attempted/enriched/failed/in_flight` и общий `failovers`.
+- Исправлен выбор RuTracker `cover_url`: static/smiles/badges, маленькие изображения и широкие декоративные полосы отбрасываются; предпочитаются portrait/book-like кандидаты.
+- Добавлен fixture corpus для обычной обложки, нескольких изображений, широкого декора перед обложкой и post без пригодной обложки.
+- Uknig parser/crawler подтверждает только full playlist и исключает rights-holder-blocked/preview-only записи.
+- Добавлен manual production workflow `uknig.yml`: `tests → crawl → audit → artifact upload → state commit`; cron намеренно не включён до Backend `0.8.3.8.3`.
+- Версия пакета поднята до `0.1.4`.
+
 ## 0.1.3
 
 - RuTracker enrichment через TorrServer формирует полный transport: `torrent.files[]` и главы `torrent://<info_hash>/<file_index>`.
