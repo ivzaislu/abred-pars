@@ -19,6 +19,10 @@ class TorrServerMetadataError(RuntimeError):
     pass
 
 
+class TorrServerTransientError(TorrServerMetadataError):
+    """Временная ошибка, для которой допустим один failover на другой сервер."""
+
+
 class TorrServerClient:
     """Минимальный metadata-only клиент одного общего TorrServer.
 
@@ -149,7 +153,7 @@ class TorrServerClient:
 
             if time.monotonic() >= deadline:
                 suffix = f"; last_state={last_state}" if last_state else ""
-                raise TorrServerMetadataError(
+                raise TorrServerTransientError(
                     f"timeout waiting for torrent metadata: {expected_hash}{suffix}"
                 )
 
@@ -160,13 +164,25 @@ class TorrServerClient:
             status = await self.get(expected_hash)
 
 
-class TorrServerPool:
-    """Пул TorrServer для стабильного распределения metadata-запросов.
+def _is_transient_torrserver_error(exc: Exception) -> bool:
+    if isinstance(exc, TorrServerTransientError):
+        return True
+    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status == 429 or status >= 500
+    return False
 
-    Основной сервер выбирается детерминированно по ``info_hash``. При двух
-    серверах это распределяет разные torrents между обоими, не требуя общего
-    состояния. Если выбранный сервер не смог вернуть metadata, тот же запрос
-    последовательно пробуется на остальных серверах пула.
+
+class TorrServerPool:
+    """Пул TorrServer с least-in-flight выбором и одним transient failover.
+
+    Одновременные разные ``info_hash`` распределяются по наименее занятым
+    серверам; при равной загрузке порядок стабильно определяется самим hash.
+    Один hash никогда не отправляется на два сервера одновременно. Только
+    timeout/network/HTTP 429/5xx разрешают один последовательный failover на
+    другой сервер. Structural metadata errors остаются blocking без failover.
 
     Логин и пароль задаются один раз в ``from_urls`` и применяются ко всем
     экземплярам. Пустые и повторяющиеся URL игнорируются; один URL сохраняет
@@ -177,6 +193,11 @@ class TorrServerPool:
         self.clients = tuple(clients)
         if not self.clients:
             raise ValueError("at least one TorrServer client is required")
+        self._in_flight = [0 for _ in self.clients]
+        self._attempted = [0 for _ in self.clients]
+        self._enriched = [0 for _ in self.clients]
+        self._failed = [0 for _ in self.clients]
+        self._failovers = 0
 
     @classmethod
     def from_urls(
@@ -210,24 +231,71 @@ class TorrServerPool:
     def size(self) -> int:
         return len(self.clients)
 
-    def _ordered_clients(self, info_hash: str) -> tuple[TorrServerClient, ...]:
+    def _primary_index(self, info_hash: str, *, exclude: set[int] | None = None) -> int:
         expected_hash = (info_hash or "").strip().lower()
         if not _HEX40_RE.fullmatch(expected_hash):
             raise TorrServerMetadataError(f"invalid info_hash: {info_hash!r}")
-        primary = int(expected_hash[-8:], 16) % len(self.clients)
-        return self.clients[primary:] + self.clients[:primary]
+        excluded = exclude or set()
+        available = [index for index in range(len(self.clients)) if index not in excluded]
+        if not available:
+            raise TorrServerMetadataError("no TorrServer instances available")
+        preferred = int(expected_hash[-8:], 16) % len(self.clients)
+        return min(
+            available,
+            key=lambda index: (
+                self._in_flight[index],
+                (index - preferred) % len(self.clients),
+            ),
+        )
+
+    async def _attempt(self, index: int, info_hash: str, magnet_uri: str) -> ParsedTorrent:
+        self._attempted[index] += 1
+        self._in_flight[index] += 1
+        try:
+            torrent = await self.clients[index].ensure_metadata(info_hash, magnet_uri)
+        except Exception:
+            self._failed[index] += 1
+            raise
+        else:
+            self._enriched[index] += 1
+            return torrent
+        finally:
+            self._in_flight[index] -= 1
 
     async def ensure_metadata(self, info_hash: str, magnet_uri: str) -> ParsedTorrent:
-        errors: list[str] = []
-        for attempt, client in enumerate(self._ordered_clients(info_hash), start=1):
+        first = self._primary_index(info_hash)
+        try:
+            return await self._attempt(first, info_hash, magnet_uri)
+        except Exception as first_exc:
+            if self.size < 2 or not _is_transient_torrserver_error(first_exc):
+                raise
+
+            second = self._primary_index(info_hash, exclude={first})
+            self._failovers += 1
             try:
-                return await client.ensure_metadata(info_hash, magnet_uri)
-            except Exception as exc:
-                errors.append(f"server#{attempt}: {type(exc).__name__}: {exc}")
-        raise TorrServerMetadataError(
-            "all TorrServer instances failed for "
-            f"{(info_hash or '').strip().lower()}: " + " | ".join(errors)
-        )
+                return await self._attempt(second, info_hash, magnet_uri)
+            except Exception as second_exc:
+                raise TorrServerMetadataError(
+                    "TorrServer failover exhausted for "
+                    f"{(info_hash or '').strip().lower()}: "
+                    f"primary={type(first_exc).__name__}: {first_exc}; "
+                    f"fallback={type(second_exc).__name__}: {second_exc}"
+                ) from second_exc
+
+    def statistics(self) -> dict:
+        return {
+            "servers": [
+                {
+                    "server": index + 1,
+                    "attempted": self._attempted[index],
+                    "enriched": self._enriched[index],
+                    "failed": self._failed[index],
+                    "in_flight": self._in_flight[index],
+                }
+                for index in range(self.size)
+            ],
+            "failovers": self._failovers,
+        }
 
     async def aclose(self) -> None:
         for client in self.clients:
