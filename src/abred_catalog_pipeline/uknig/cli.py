@@ -17,11 +17,19 @@ def _run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:12]
 
 
+def _load_uknig_cursor(path: Path) -> CrawlCursor:
+    loaded = CrawlCursor.load(path)
+    return CrawlCursor(
+        source="uknig",
+        deep_page=loaded.deep_page,
+        last_page=loaded.last_page,
+        backfill_complete=loaded.backfill_complete,
+    )
+
+
 async def _run(args: argparse.Namespace) -> int:
     state_path = Path(args.state)
-    cursor = CrawlCursor.load(state_path)
-    if cursor.source != "uknig":
-        cursor.source = "uknig"
+    cursor = _load_uknig_cursor(state_path)
 
     parser = UknigParser(base_url=args.base_url, delay_seconds=args.delay)
     try:
