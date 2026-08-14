@@ -88,6 +88,18 @@ async def crawl_once(
         try:
             detail = await parser.get_book(catalog.external_url)
             detail = _merge_catalog_fallback(detail, catalog)
+            # Feed contract: Audiopolka records are playable only when at least
+            # one full chapter/media URL was parsed. Metadata-only rows must not
+            # reach Backend preflight, otherwise one source glitch blocks the
+            # entire automatic intake stream.
+            if not detail.chapters:
+                rejected.append({
+                    "source": parser.code,
+                    "external_id": catalog.external_id,
+                    "external_url": catalog.external_url,
+                    "reason": "audiopolka_missing_full_chapters",
+                })
+                continue
             records.append(book_to_feed_record(detail, source=parser.code))
         except UnavailableBookError as exc:
             tombstones.append({
