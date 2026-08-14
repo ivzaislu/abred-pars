@@ -1,0 +1,102 @@
+name: RuTracker dual TorrServer canary
+
+on:
+  pull_request:
+    paths:
+      - "src/abred_catalog_pipeline/rutracker/**"
+      - "src/abred_catalog_pipeline/cli.py"
+      - ".github/workflows/rutracker.yml"
+      - ".github/workflows/rutracker-dual-canary.yml"
+      - "tests/test_torrserver*.py"
+      - "tests/test_rutracker*.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rutracker-dual-canary-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUTRACKER_WORKER_URL: ${{ vars.RUTRACKER_WORKER_URL }}
+  RUTRACKER_WORKER_TOKEN: ${{ secrets.RUTRACKER_WORKER_TOKEN }}
+  RUTRACKER_WORKER_TOKEN_HEADER: ${{ vars.RUTRACKER_WORKER_TOKEN_HEADER || 'X-Proxy-Token' }}
+  RUTRACKER_WORKER_MODE: ${{ vars.RUTRACKER_WORKER_MODE || 'mirror' }}
+  TORRSERVER_URL: ${{ vars.TORRSERVER_URL }}
+  TORRSERVER_URL_2: ${{ vars.TORRSERVER_URL_2 }}
+  TORRSERVER_USERNAME: ${{ secrets.TORRSERVER_USERNAME }}
+  TORRSERVER_PASSWORD: ${{ secrets.TORRSERVER_PASSWORD }}
+  TORRSERVER_TIMEOUT_SECONDS: ${{ vars.TORRSERVER_TIMEOUT_SECONDS || '30' }}
+  TORRSERVER_POLL_INTERVAL_SECONDS: ${{ vars.TORRSERVER_POLL_INTERVAL_SECONDS || '1' }}
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: pip install -e '.[test]'
+
+      - name: Validate dual TorrServer configuration
+        shell: bash
+        run: |
+          test -n "$RUTRACKER_WORKER_URL" || { echo "Missing RUTRACKER_WORKER_URL"; exit 1; }
+          test -n "$RUTRACKER_WORKER_TOKEN" || { echo "Missing RUTRACKER_WORKER_TOKEN"; exit 1; }
+          test -n "$TORRSERVER_URL" || { echo "Missing TORRSERVER_URL"; exit 1; }
+          test -n "$TORRSERVER_URL_2" || { echo "Missing TORRSERVER_URL_2"; exit 1; }
+          test "$TORRSERVER_URL" != "$TORRSERVER_URL_2" || { echo "TORRSERVER_URL_2 duplicates TORRSERVER_URL"; exit 1; }
+          echo "Two distinct TorrServer URLs configured with shared credentials"
+
+      - name: Read-only RuTracker dual-server crawl
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m abred_catalog_pipeline run-rutracker \
+            --state state/rutracker.json \
+            --out artifacts \
+            --max-topics 4 \
+            --torrserver-enrich \
+            --torrserver-max-new 4 \
+            --torrserver-replay-successes 1 \
+            --run-id "dual-canary-${{ github.run_id }}" \
+            | tee dual-canary-result.json
+
+      - name: Audit both TorrServer instances were used
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          result = json.loads(Path("dual-canary-result.json").read_text(encoding="utf-8"))
+          stats = result["torrent_metadata"]
+          servers = stats.get("servers") or []
+          assert len(servers) == 2, servers
+          assert all(int(server.get("attempted") or 0) >= 1 for server in servers), servers
+          assert sum(int(server.get("enriched") or 0) for server in servers) >= 1, servers
+          assert result["records"], result
+          print(json.dumps({
+              "records": result["records"],
+              "servers": servers,
+              "failovers": stats.get("failovers", 0),
+          }, ensure_ascii=False, indent=2))
+          PY
+
+      - name: Upload canary artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rutracker-dual-canary-${{ github.run_id }}
+          path: |
+            artifacts/**/feed.json
+            artifacts/**/manifest.json
+            dual-canary-result.json
+          if-no-files-found: warn
+          retention-days: 7
