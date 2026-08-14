@@ -3,8 +3,13 @@
 Отдельный crawler/parser/feed producer для AudioBookRed.
 
 Текущая версия пакета: `0.1.3`.
+Следующий patch: `0.1.4` — Uknig, dual-TorrServer RuTracker и исправление выбора обложек.
+
+Подробный план: [`PATCH_ROADMAP.md`](PATCH_ROADMAP.md).
 
 Producer не подключается к production PostgreSQL и публикует source-native feed artifacts, которые Backend отдельно валидирует и импортирует.
+
+Все массовые catalog crawler/parser/feed producer проекта находятся в этом репозитории. Backend `ivzaislu/abred` не должен выполнять bulk crawl внешних каталогов.
 
 ## Audiopolka
 
