@@ -86,15 +86,20 @@ Uknig реализован отдельным source package `abred_catalog_pipe
 
 Canary workflow: `.github/workflows/uknig-canary.yml`.
 
-Production feed workflow: `.github/workflows/uknig.yml`. Он уже формирует `uknig-feed-<github-run-id>` и сохраняет `state/uknig.json` только после успешного upload artifact, но **пока доступен только вручную**. Cron намеренно не включён до production Backend `0.8.3.8.3` с поддержкой `source=uknig`.
+Production feed workflow: `.github/workflows/uknig.yml`.
 
-Ручной локальный запуск:
+Расписание: каждый час в `:07 UTC`, перед Audiopolka (`:17 UTC`). Пока bootstrap не завершён, каждый scheduled run обрабатывает ровно 20 страниц каталога: актуальную page 1 плюс 19 deep-backfill страниц (`backfill_pages=19`). После завершения bootstrap cursor-механизм продолжит проверять page 1 без повторного обхода старого диапазона.
+
+Workflow формирует `uknig-feed-<github-run-id>` и сохраняет `state/uknig.json` только после успешного upload artifact. Задержка между Uknig HTTP requests по умолчанию — `0.35` секунды.
+
+Ручной локальный запуск с тем же лимитом 20 страниц:
 
 ```bash
 python -m abred_catalog_pipeline.uknig \
   --state state/uknig.json \
   --out artifacts \
-  --backfill-pages 5
+  --backfill-pages 19 \
+  --delay 0.35
 ```
 
 ## State
