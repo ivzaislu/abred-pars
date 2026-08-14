@@ -88,17 +88,17 @@ Canary workflow: `.github/workflows/uknig-canary.yml`.
 
 Production feed workflow: `.github/workflows/uknig.yml`.
 
-Расписание: каждый час в `:07 UTC`, перед Audiopolka (`:17 UTC`). Пока bootstrap не завершён, каждый scheduled run обрабатывает ровно 20 страниц каталога: актуальную page 1 плюс 19 deep-backfill страниц (`backfill_pages=19`). После завершения bootstrap cursor-механизм продолжит проверять page 1 без повторного обхода старого диапазона.
+Расписание: каждый час в `:07 UTC`, перед Audiopolka (`:17 UTC`). Пока bootstrap не завершён, каждый scheduled run обрабатывает актуальную page 1 плюс 20 deep-backfill страниц (`backfill_pages=20`), то есть до 21 страницы каталога за запуск. После завершения bootstrap cursor-механизм продолжит проверять page 1 без повторного обхода старого диапазона.
 
 Workflow формирует `uknig-feed-<github-run-id>` и сохраняет `state/uknig.json` только после успешного upload artifact. Задержка между Uknig HTTP requests по умолчанию — `0.35` секунды.
 
-Ручной локальный запуск с тем же лимитом 20 страниц:
+Ручной локальный запуск с тем же deep-backfill лимитом:
 
 ```bash
 python -m abred_catalog_pipeline.uknig \
   --state state/uknig.json \
   --out artifacts \
-  --backfill-pages 19 \
+  --backfill-pages 20 \
   --delay 0.35
 ```
 
