@@ -13,6 +13,8 @@ from ..models import AudiobookSource, ParsedBook, ParsedChapter, PreviewOnlyBook
 _BOOK_RE = re.compile(r"(?:^|/)books/(\d+)(?:/|$)")
 _MEDIA_URL_RE = re.compile(r"https?://[^\s]+", re.I)
 _RIGHTS_BLOCKED = "прослушивание заблокировано правообладателем"
+_FULL_VERSION = "полная версия аудиокниги"
+_PREVIEW_MARKERS = ("ознакомительный фрагмент", "фрагмент аудиокниги")
 
 
 def _clean(value: str) -> str:
@@ -129,8 +131,11 @@ def parse_catalog_html(html: str, page_url: str, base_url: str) -> list[ParsedBo
 def parse_book_html(html: str, book_url: str, base_url: str) -> ParsedBook:
     soup = BeautifulSoup(html, "html.parser")
     page_text = _clean(soup.get_text(" ", strip=True))
-    if _RIGHTS_BLOCKED in page_text.casefold():
+    page_fold = page_text.casefold()
+    if _RIGHTS_BLOCKED in page_fold:
         raise UnavailableBookError(book_url, reason="rights_holder_blocked")
+    if _FULL_VERSION not in page_fold and any(marker in page_fold for marker in _PREVIEW_MARKERS):
+        raise PreviewOnlyBookError(book_url, reason="preview_only")
 
     external_id = _book_id(book_url)
     if not external_id:
