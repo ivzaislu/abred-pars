@@ -32,12 +32,22 @@ DETAIL_HTML = """
 <div>Читает <a href="/readers/marina-vysotskaya">Марина Высоцкая</a></div>
 <div>Входит в серию <a href="/series/9006">Ничего</a> (#2)</div>
 <div>13 часов 12 минут</div>
+<div>Ознакомительный фрагмент</div>
+<div>Полная версия аудиокниги</div>
 </body></html>
 """
 
 BLOCKED_HTML = """
 <html><body><h1>Закрытая книга</h1>
 <div>Прослушивание заблокировано правообладателем</div>
+</body></html>
+"""
+
+FRAGMENT_ONLY_HTML = """
+<html><body><h1>Только фрагмент</h1>
+<div>Слушать аудиокнигу</div>
+<div>Ознакомительный фрагмент</div>
+<div>Фрагмент аудиокниги «Только фрагмент»</div>
 </body></html>
 """
 
@@ -81,6 +91,12 @@ def test_rights_holder_blocked_is_unavailable():
     assert error.value.reason == "rights_holder_blocked"
 
 
+def test_fragment_only_detail_is_preview_only():
+    with pytest.raises(PreviewOnlyBookError) as error:
+        parse_book_html(FRAGMENT_ONLY_HTML, "https://uknig.com/books/724452", "https://uknig.com")
+    assert error.value.reason == "preview_only"
+
+
 def test_full_playlist_becomes_chapters_and_normalizes_alternative_url():
     chapters = parse_playlist_json(PLAYLIST, "https://uknig.com/books/815724")
     assert [chapter.external_id for chapter in chapters] == ["10", "11"]
@@ -119,6 +135,29 @@ async def test_get_book_requires_full_playlist(monkeypatch):
     try:
         with pytest.raises(PreviewOnlyBookError):
             await parser.get_book("https://uknig.com/books/815724")
+    finally:
+        await parser.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fragment_only_page_never_requests_full_playlist(monkeypatch):
+    parser = UknigParser(delay_seconds=0)
+    playlist_called = False
+
+    async def fake_get(url):
+        return FRAGMENT_ONLY_HTML
+
+    async def fake_playlist(book_id, book_url):
+        nonlocal playlist_called
+        playlist_called = True
+        return PLAYLIST
+
+    monkeypatch.setattr(parser, "_get", fake_get)
+    monkeypatch.setattr(parser, "_get_playlist", fake_playlist)
+    try:
+        with pytest.raises(PreviewOnlyBookError):
+            await parser.get_book("https://uknig.com/books/724452")
+        assert playlist_called is False
     finally:
         await parser.aclose()
 
