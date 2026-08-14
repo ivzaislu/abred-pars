@@ -44,11 +44,35 @@ Workflow: `.github/workflows/rutracker.yml`.
 
 RuTracker workflow также публикует artifact до сохранения cursor/TorrServer state.
 
+## Uknig — разработка `0.1.4`
+
+Uknig реализован отдельным source package `abred_catalog_pipeline.uknig`. На этапе canary автоматическое расписание не включается.
+
+Каталог использует `https://uknig.com/?p=<N>`, stable source ID берётся из `/books/<id>`. Полная аудиокнига подтверждается только непустым full playlist `/index.php/books/<id>/playlist.txt`; наличие одного ознакомительного фрагмента недостаточно.
+
+Жёсткие правила доступности:
+
+- `Прослушивание заблокировано правообладателем` → `rights_holder_blocked`, playable record не создаётся;
+- есть только ознакомительный фрагмент, но нет полного playlist → `preview_only`, playable record не создаётся;
+- в feed попадают только книги с непустым full playlist и валидными media URL.
+
+Ручной canary:
+
+```bash
+python -m abred_catalog_pipeline.uknig \
+  --state state/uknig.json \
+  --out artifacts \
+  --backfill-pages 1
+```
+
+Перед включением scheduled workflow обязательны fixture tests, небольшой live canary и ручной audit `feed.json`/media contract.
+
 ## State
 
 ```text
 state/audiopolka.json
 state/rutracker.json
+state/uknig.json
 ```
 
 Пустой state означает полный bootstrap с нуля. Для RuTracker это также означает повторный сбор TorrServer metadata cache.
@@ -58,6 +82,7 @@ state/rutracker.json
 ```text
 audiopolka-feed-<github-run-id>
 rutracker-feed-<github-run-id>
+uknig-feed-<github-run-id>   # после включения workflow
 ```
 
 Backend `ivzaislu/abred` импортирует их через per-source `app.feed_auto`. Producer напрямую в production DB не пишет.
