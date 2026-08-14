@@ -15,13 +15,36 @@ abred-pars 0.1.4
 
 ## Uknig
 
-Добавить `https://uknig.com/` как третий producer source:
+### Уже готово в `main`
 
-- parser, crawler, state, CLI и GitHub Actions workflow;
-- artifact `uknig-feed-<github-run-id>` с `feed.json`/`manifest.json`;
-- fixtures/tests для ID, pagination, authors, narrators, genres, series, duration, chapters/media и unavailable/tombstone semantics;
-- cursor/state сохранять только после успешного upload artifact;
-- до production cutover провести небольшой canary и ручной audit transport-контракта;
+Первый Uknig-компонент смёржен через PR #14:
+
+- parser и crawler для `https://uknig.com/`;
+- stable source ID из `/books/<id>`;
+- pagination `/?p=<N>`;
+- metadata: title, description, cover, authors, narrators, genres, series/position, duration;
+- full playlist `/index.php/books/<id>/playlist.txt` → chapters/media;
+- state `state/uknig.json`;
+- ручной CLI `python -m abred_catalog_pipeline.uknig`;
+- unit/regression tests;
+- read-only live canary без persistent state и без schedule.
+
+Жёсткие фильтры:
+
+- `Прослушивание заблокировано правообладателем` → `rights_holder_blocked`, playable record не создаётся;
+- страница только с ознакомительным фрагментом без `Полная версия аудиокниги` → `preview_only`, playable record не создаётся;
+- пустой/недоступный/невалидный full playlist → `preview_only`;
+- playlist вида `stream URL or download URL` нормализуется до одного HTTPS media URL.
+
+Live canary `31792720994` прошёл: текущая page 1 дала 24 playable records / 670 chapters, feed contract audit green; известная rights-holder-blocked книга была корректно отклонена.
+
+### Осталось до production producer
+
+- добавить production workflow/artifact `uknig-feed-<github-run-id>` с `feed.json`/`manifest.json`;
+- сохранять cursor/state только после успешного upload artifact;
+- выбрать безопасный bootstrap rate для каталога примерно в несколько тысяч страниц;
+- scheduled запуск включать только после готовности Backend `0.8.3.8.3` к `source=uknig`;
+- перед cutover повторить небольшой canary и ручной audit transport-контракта;
 - использовать только штатно доступные данные, без обхода авторизации/DRM/ограничений доступа.
 
 ## RuTracker: два TorrServer
