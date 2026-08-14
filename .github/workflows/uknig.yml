@@ -6,7 +6,7 @@ on:
       backfill_pages:
         description: "Deep bootstrap pages per run in addition to page 1"
         required: false
-        default: "20"
+        default: "50"
         type: string
       delay_seconds:
         description: "Delay between Uknig HTTP requests"
@@ -51,7 +51,7 @@ jobs:
           python -m abred_catalog_pipeline.uknig \
             --state state/uknig.json \
             --out artifacts \
-            --backfill-pages "${{ inputs.backfill_pages || '20' }}" \
+            --backfill-pages "${{ inputs.backfill_pages || '50' }}" \
             --delay "${{ inputs.delay_seconds || '0.35' }}" \
             --run-id "uknig-${{ github.run_id }}" \
             | tee uknig-result.json
