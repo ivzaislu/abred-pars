@@ -1,5 +1,21 @@
 # История изменений
 
+## Unreleased — после 0.1.4
+
+- Uknig production workflow переведён с manual-only на hourly schedule `7 * * * *` (`:07 UTC`).
+- Scheduled Uknig bootstrap обрабатывает page 1 + 20 deep-backfill страниц за run с default delay `0.35s`.
+- Исправлена preview-only semantics Uknig: явный ознакомительный фрагмент публикуется как tombstone даже если страница содержит CTA/ссылку на полную версию.
+- Uknig cursor state уже продвигался production runs после успешной публикации artifacts.
+- Документация синхронизирована с фактическим scheduled state; старое утверждение `manual-only` больше не актуально.
+
+### Audit debt, не исправленный в этом docs patch
+
+- Audiopolka/Uknig generic `detail_fetch_or_parse_error` сейчас не удерживает deep cursor; transient detail failure может привести к пропуску старой страницы после продвижения bootstrap state.
+- Artifact cleanup workflow удаляет только `audiopolka-feed-*` и `rutracker-feed-*`, но не `uknig-feed-*`.
+- Operational cursor/cache state коммитится ботом прямо в `main`, что смешивает code history и runtime state history.
+- Uknig live canary обращается к внешнему source из PR workflow; deterministic tests и live-source verification стоит разделить жёстче.
+- В `tools/` остаётся one-shot `apply_rutracker_title_cleanup.py`, хотя соответствующая parser/test логика уже находится в main; перед удалением нужен final equivalence check.
+
 ## 0.1.4
 
 - RuTracker metadata enrichment переведён на pool из `TORRSERVER_URL` + `TORRSERVER_URL_2` с общими `TORRSERVER_USERNAME` / `TORRSERVER_PASSWORD`.
@@ -11,7 +27,7 @@
 - Добавлен fixture corpus для обычной обложки, нескольких изображений, широкого декора перед обложкой и post без пригодной обложки.
 - Исправлена старая битая RuTracker-разметка `Цикл/серия`: следующие metadata-поля больше не захватываются в `series_name`; аномально длинное неразделимое значение отбрасывается вместо отправки структурно невалидной строки в Backend.
 - Uknig parser/crawler подтверждает только full playlist и исключает rights-holder-blocked/preview-only записи.
-- Добавлен manual production workflow `uknig.yml`: `tests → crawl → audit → artifact upload → state commit`; cron намеренно не включён до Backend `0.8.3.8.3`.
+- Добавлен production workflow `uknig.yml` с безопасным порядком `tests → crawl → audit → artifact upload → state commit`. На момент самого release `0.1.4` cron ещё не был включён; hourly schedule добавлен позже в `main` и отражён в разделе Unreleased.
 - Версия пакета поднята до `0.1.4`.
 
 ## 0.1.3
