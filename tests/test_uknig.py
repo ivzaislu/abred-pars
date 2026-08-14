@@ -32,8 +32,8 @@ DETAIL_HTML = """
 <div>Читает <a href="/readers/marina-vysotskaya">Марина Высоцкая</a></div>
 <div>Входит в серию <a href="/series/9006">Ничего</a> (#2)</div>
 <div>13 часов 12 минут</div>
-<div>Ознакомительный фрагмент</div>
-<div>Полная версия аудиокниги</div>
+<div>Слушать аудиокнигу</div>
+<div id="player"></div>
 </body></html>
 """
 
@@ -48,6 +48,18 @@ FRAGMENT_ONLY_HTML = """
 <div>Слушать аудиокнигу</div>
 <div>Ознакомительный фрагмент</div>
 <div>Фрагмент аудиокниги «Только фрагмент»</div>
+</body></html>
+"""
+
+PREVIEW_WITH_FULL_VERSION_CTA_HTML = """
+<html><body><h1>Черный Обелиск</h1>
+<div>Автор: <a href="/authors/erih-mariya-remark">Эрих Мария Ремарк</a></div>
+<div class="alert-info">Ознакомительный фрагмент</div>
+<div id="player"></div>
+<a rel="nofollow" href="https://www.litres.ru/5957154/">Полная версия аудиокниги</a>
+<script>
+var player = new Playerjs({id:"player", title: "Фрагмент аудиокниги \"Черный Обелиск\"", file:"https://www.litres.ru/get_mp3_trial/5957154.mp3"});
+</script>
 </body></html>
 """
 
@@ -94,6 +106,16 @@ def test_rights_holder_blocked_is_unavailable():
 def test_fragment_only_detail_is_preview_only():
     with pytest.raises(PreviewOnlyBookError) as error:
         parse_book_html(FRAGMENT_ONLY_HTML, "https://uknig.com/books/724452", "https://uknig.com")
+    assert error.value.reason == "preview_only"
+
+
+def test_preview_marker_wins_even_when_page_has_full_version_cta():
+    with pytest.raises(PreviewOnlyBookError) as error:
+        parse_book_html(
+            PREVIEW_WITH_FULL_VERSION_CTA_HTML,
+            "https://uknig.com/books/677966",
+            "https://uknig.com",
+        )
     assert error.value.reason == "preview_only"
 
 
@@ -145,7 +167,7 @@ async def test_fragment_only_page_never_requests_full_playlist(monkeypatch):
     playlist_called = False
 
     async def fake_get(url):
-        return FRAGMENT_ONLY_HTML
+        return PREVIEW_WITH_FULL_VERSION_CTA_HTML
 
     async def fake_playlist(book_id, book_url):
         nonlocal playlist_called
@@ -156,14 +178,14 @@ async def test_fragment_only_page_never_requests_full_playlist(monkeypatch):
     monkeypatch.setattr(parser, "_get_playlist", fake_playlist)
     try:
         with pytest.raises(PreviewOnlyBookError):
-            await parser.get_book("https://uknig.com/books/724452")
+            await parser.get_book("https://uknig.com/books/677966")
         assert playlist_called is False
     finally:
         await parser.aclose()
 
 
 @pytest.mark.asyncio
-async def test_crawler_never_publishes_blocked_or_preview_only():
+async def test_crawler_tombstones_blocked_and_preview_only():
     class FakeParser:
         code = "uknig"
         base_url = "https://uknig.com"
@@ -178,5 +200,8 @@ async def test_crawler_never_publishes_blocked_or_preview_only():
 
     result, _ = await crawl_once(FakeParser(), CrawlCursor(source="uknig"), backfill_pages=1)
     assert result["records"] == []
-    assert {row["reason"] for row in result["rejected"]} == {"preview_only"}
-    assert {row["reason"] for row in result["tombstones"]} == {"rights_holder_blocked"}
+    assert result["rejected"] == []
+    assert {row["reason"] for row in result["tombstones"]} == {
+        "preview_only",
+        "rights_holder_blocked",
+    }

@@ -64,15 +64,11 @@ async def crawl_once(
         try:
             detail = await parser.get_book(catalog.external_url)
             records.append(book_to_feed_record(detail, source=parser.code))
-        except UnavailableBookError as exc:
+        except (UnavailableBookError, PreviewOnlyBookError) as exc:
+            # Для каталога обе ситуации означают одно: полной версии больше
+            # нельзя предлагать пользователю. Tombstone также корректно снимает
+            # уже импортированную книгу, если она позже стала preview-only.
             tombstones.append({
-                "source": parser.code,
-                "external_id": catalog.external_id,
-                "external_url": catalog.external_url,
-                "reason": exc.reason,
-            })
-        except PreviewOnlyBookError as exc:
-            rejected.append({
                 "source": parser.code,
                 "external_id": catalog.external_id,
                 "external_url": catalog.external_url,
