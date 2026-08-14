@@ -43,7 +43,11 @@ BLOCKED_HTML = """
 
 PLAYLIST = [
     {"title": "Глава 1", "file": "https://uknig.com/index.php/files/10?h=a", "id": "10"},
-    {"title": "Глава 2", "file": "https://uknig.com/index.php/files/11?h=b", "id": "11"},
+    {
+        "title": "Глава 2",
+        "file": "https://uknig.com/files/11?h=b or https://uknig.com/files/11?d=1&h=b",
+        "id": "11",
+    },
 ]
 
 
@@ -77,17 +81,27 @@ def test_rights_holder_blocked_is_unavailable():
     assert error.value.reason == "rights_holder_blocked"
 
 
-def test_full_playlist_becomes_chapters():
+def test_full_playlist_becomes_chapters_and_normalizes_alternative_url():
     chapters = parse_playlist_json(PLAYLIST, "https://uknig.com/books/815724")
     assert [chapter.external_id for chapter in chapters] == ["10", "11"]
     assert chapters[0].position == 1
     assert chapters[0].media_url.endswith("/files/10?h=a")
+    assert chapters[1].media_url == "https://uknig.com/files/11?h=b"
+    assert " or " not in chapters[1].media_url
 
 
 def test_missing_full_playlist_is_preview_only():
     with pytest.raises(PreviewOnlyBookError) as error:
         parse_playlist_json([], "https://uknig.com/books/724452")
     assert error.value.reason == "preview_only"
+
+
+def test_playlist_without_valid_media_is_preview_only():
+    with pytest.raises(PreviewOnlyBookError):
+        parse_playlist_json(
+            [{"title": "Фрагмент", "file": "not-a-url", "id": "1"}],
+            "https://uknig.com/books/724452",
+        )
 
 
 @pytest.mark.asyncio
