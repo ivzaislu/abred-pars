@@ -19,6 +19,35 @@ _NEXT_FIELD_RE = re.compile(
     r")\s*[:：])"
 )
 
+_METADATA_LABEL_ONLY = {
+    "номер книги",
+    "номер в серии",
+    "номер в цикле",
+    "№ книги",
+    "жанр",
+    "жанры",
+    "издательство",
+    "категория",
+    "аудиокодек",
+    "кодек",
+    "битрейт",
+    "вид битрейта",
+    "качество",
+    "время звучания",
+    "общее время звучания",
+    "продолжительность",
+    "описание",
+    "доп. информация",
+    "дополнительная информация",
+    "год выпуска",
+    "автор",
+    "авторы",
+    "исполнитель",
+    "исполнители",
+    "читает",
+    "чтец",
+}
+
 
 def _clean(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
@@ -58,6 +87,12 @@ def normalize_series_name(value: str) -> str:
             text = _clean(cycle_quote.group(1))
 
     text = _clean(text).strip(" -:：,;.")
+
+    # Broken templates can expose the label of the next field itself as the
+    # `Цикл/серия` value (production topic 4849650 produced "Номер книги").
+    # A metadata label is not a catalog series name and must be discarded.
+    if text.casefold() in _METADATA_LABEL_ONLY:
+        return ""
 
     # A real series name can be long, but a flattened metadata block is not a
     # useful catalog value. Keep a margin well below Backend VARCHAR(512).
