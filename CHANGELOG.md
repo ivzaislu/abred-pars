@@ -9,6 +9,7 @@
 - В статистику run добавлены per-server `attempted/enriched/failed/in_flight` и общий `failovers`.
 - Исправлен выбор RuTracker `cover_url`: static/smiles/badges, маленькие изображения и широкие декоративные полосы отбрасываются; предпочитаются portrait/book-like кандидаты.
 - Добавлен fixture corpus для обычной обложки, нескольких изображений, широкого декора перед обложкой и post без пригодной обложки.
+- Исправлена старая битая RuTracker-разметка `Цикл/серия`: следующие metadata-поля больше не захватываются в `series_name`; аномально длинное неразделимое значение отбрасывается вместо отправки структурно невалидной строки в Backend.
 - Uknig parser/crawler подтверждает только full playlist и исключает rights-holder-blocked/preview-only записи.
 - Добавлен manual production workflow `uknig.yml`: `tests → crawl → audit → artifact upload → state commit`; cron намеренно не включён до Backend `0.8.3.8.3`.
 - Версия пакета поднята до `0.1.4`.
