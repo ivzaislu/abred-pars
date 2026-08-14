@@ -25,6 +25,28 @@ jobs:
         run: pip install -e '.[test]'
       - name: Uknig tests
         run: pytest -q tests/test_uknig.py
+      - name: Verify live rights-holder block
+        shell: bash
+        run: |
+          python - <<'PY'
+          import asyncio
+          from abred_catalog_pipeline.models import UnavailableBookError
+          from abred_catalog_pipeline.uknig.parser import UknigParser
+
+          async def main():
+              parser = UknigParser(delay_seconds=0)
+              try:
+                  try:
+                      await parser.get_book("https://uknig.com/books/804690")
+                  except UnavailableBookError as exc:
+                      assert exc.reason == "rights_holder_blocked", exc.reason
+                  else:
+                      raise AssertionError("known rights-holder-blocked book became playable")
+              finally:
+                  await parser.aclose()
+
+          asyncio.run(main())
+          PY
       - name: Crawl current catalog page without persistent state
         shell: bash
         run: |
