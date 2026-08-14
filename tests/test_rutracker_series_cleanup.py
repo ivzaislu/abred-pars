@@ -16,6 +16,12 @@ def test_series_cleanup_stops_at_next_flattened_metadata_label():
     assert normalize_series_name(raw) == "Перья"
 
 
+def test_series_cleanup_rejects_metadata_label_as_series_name():
+    assert normalize_series_name("Номер книги") == ""
+    assert normalize_series_name("Жанр") == ""
+    assert normalize_series_name("Издательство") == ""
+
+
 def test_series_cleanup_rejects_unbounded_garbage_instead_of_truncating():
     assert normalize_series_name("x" * 600) == ""
 
