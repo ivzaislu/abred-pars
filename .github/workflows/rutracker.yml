@@ -50,6 +50,7 @@ env:
   RUTRACKER_WORKER_TOKEN_HEADER: ${{ vars.RUTRACKER_WORKER_TOKEN_HEADER || 'X-Proxy-Token' }}
   RUTRACKER_WORKER_MODE: ${{ vars.RUTRACKER_WORKER_MODE || 'mirror' }}
   TORRSERVER_URL: ${{ vars.TORRSERVER_URL }}
+  TORRSERVER_URL_2: ${{ vars.TORRSERVER_URL_2 }}
   TORRSERVER_USERNAME: ${{ secrets.TORRSERVER_USERNAME }}
   TORRSERVER_PASSWORD: ${{ secrets.TORRSERVER_PASSWORD }}
   TORRSERVER_MAX_NEW: '0'
@@ -95,8 +96,17 @@ jobs:
           fi
 
           if [[ "$use_torrserver" == "true" ]]; then
-            test -n "$TORRSERVER_URL" || { echo "Missing Actions variable TORRSERVER_URL"; exit 1; }
-            echo "TorrServer URL configured"
+            if [[ -z "$TORRSERVER_URL" && -z "$TORRSERVER_URL_2" ]]; then
+              echo "Missing Actions variable TORRSERVER_URL/TORRSERVER_URL_2"
+              exit 1
+            fi
+            torrserver_count=0
+            [[ -n "$TORRSERVER_URL" ]] && torrserver_count=$((torrserver_count + 1))
+            if [[ -n "$TORRSERVER_URL_2" && "$TORRSERVER_URL_2" != "$TORRSERVER_URL" ]]; then
+              torrserver_count=$((torrserver_count + 1))
+            fi
+            echo "TorrServer instances configured: $torrserver_count"
+            echo "TorrServer credentials: shared TORRSERVER_USERNAME/TORRSERVER_PASSWORD"
             echo "TorrServer max unconfirmed hashes: $TORRSERVER_MAX_NEW (0 = unlimited)"
             echo "TorrServer timeout: ${TORRSERVER_TIMEOUT_SECONDS}s"
             echo "TorrServer replay successes: $TORRSERVER_REPLAY_SUCCESSES"
