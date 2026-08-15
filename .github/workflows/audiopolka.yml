@@ -35,15 +35,41 @@ jobs:
         run: pytest -q
 
       - name: Crawl Audiopolka
+        shell: bash
+        env:
+          ABRED_RETRY_CLEAN_PATHS: artifacts
         run: |
-          python -m abred_catalog_pipeline run-audiopolka \
-            --state state/audiopolka.json \
-            --out artifacts \
-            --backfill-pages 50 \
+          set -o pipefail
+          bash tools/run-with-transient-retry.sh \
+            python -m abred_catalog_pipeline run-audiopolka \
+              --state state/audiopolka.json \
+              --out artifacts \
+              --backfill-pages 50 \
             | tee crawl-result.json
 
-      # Publish the feed before advancing cursor state. If artifact upload
-      # fails, the next run safely repeats the same cursor window.
+      - name: Audit feed contract
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          feeds = list(Path("artifacts").glob("*/feed.json"))
+          manifests = list(Path("artifacts").glob("*/manifest.json"))
+          assert len(feeds) == 1, feeds
+          assert len(manifests) == 1, manifests
+
+          feed = json.loads(feeds[0].read_text(encoding="utf-8"))
+          manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+          assert feed["source"] == "audiopolka"
+          assert manifest["source"] == "audiopolka"
+          assert manifest["feed_id"] == feed["feed_id"]
+          assert manifest["run_id"] == feed["run_id"]
+          print(json.dumps(feed["counts"], ensure_ascii=False, indent=2))
+          PY
+
+      # Publish the feed before advancing cursor state. If crawl, audit or
+      # artifact upload fails, the next run safely repeats the same cursor window.
       - name: Upload feed artifact
         uses: actions/upload-artifact@v4
         with:
