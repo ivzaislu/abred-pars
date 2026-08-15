@@ -47,13 +47,17 @@ jobs:
 
       - name: Crawl Uknig
         shell: bash
+        env:
+          ABRED_RETRY_CLEAN_PATHS: artifacts
         run: |
-          python -m abred_catalog_pipeline.uknig \
-            --state state/uknig.json \
-            --out artifacts \
-            --backfill-pages "${{ inputs.backfill_pages || '50' }}" \
-            --delay "${{ inputs.delay_seconds || '0.35' }}" \
-            --run-id "uknig-${{ github.run_id }}" \
+          set -o pipefail
+          bash tools/run-with-transient-retry.sh \
+            python -m abred_catalog_pipeline.uknig \
+              --state state/uknig.json \
+              --out artifacts \
+              --backfill-pages "${{ inputs.backfill_pages || '50' }}" \
+              --delay "${{ inputs.delay_seconds || '0.35' }}" \
+              --run-id "uknig-${{ github.run_id }}" \
             | tee uknig-result.json
 
       - name: Audit feed contract
@@ -65,9 +69,15 @@ jobs:
           from urllib.parse import urlparse
 
           feeds = list(Path("artifacts").glob("*/feed.json"))
+          manifests = list(Path("artifacts").glob("*/manifest.json"))
           assert len(feeds) == 1, feeds
+          assert len(manifests) == 1, manifests
           feed = json.loads(feeds[0].read_text(encoding="utf-8"))
+          manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
           assert feed["source"] == "uknig"
+          assert manifest["source"] == "uknig"
+          assert manifest["feed_id"] == feed["feed_id"]
+          assert manifest["run_id"] == feed["run_id"]
           for record in feed["records"]:
               assert record["chapters"], record["external_id"]
               for chapter in record["chapters"]:
@@ -79,8 +89,9 @@ jobs:
           print(json.dumps(feed["counts"], ensure_ascii=False, indent=2))
           PY
 
-      # Artifact must exist before cursor state is committed. If upload fails,
-      # the repository state remains unchanged and the next run repeats safely.
+      # Artifact must exist before cursor state is committed. If crawl, audit or
+      # upload fails, the repository state remains unchanged and the next run
+      # repeats the same cursor window safely.
       - name: Upload feed artifact
         uses: actions/upload-artifact@v4
         with:
