@@ -14,8 +14,8 @@ on:
         default: "0.35"
         type: string
   schedule:
-    # Every hour at :07 UTC, staggered before Audiopolka (:17).
-    - cron: "7 * * * *"
+    # At :07 UTC on hours 00, 10 and 20, staggered before Audiopolka (:17).
+    - cron: "7 */10 * * *"
 
 permissions:
   contents: write
