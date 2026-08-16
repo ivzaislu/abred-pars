@@ -34,8 +34,8 @@ on:
         default: "0"
         type: string
   schedule:
-    # Every 2 hours at :47 UTC, staggered after Audiopolka.
-    - cron: "47 */2 * * *"
+    # At :47 UTC on hours 00 and 20, staggered after Audiopolka.
+    - cron: "47 */20 * * *"
 
 permissions:
   contents: write
