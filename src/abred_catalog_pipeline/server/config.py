@@ -38,6 +38,7 @@ class ServerSettings:
     port: int
     scheduler_enabled: bool
     scheduler_poll_seconds: float
+    feed_retention_hours: int
 
     audiopolka_base_url: str
     audiopolka_backfill_pages: int
@@ -87,6 +88,7 @@ class ServerSettings:
             port=_int_env("PARSER_PORT", 8081, minimum=1, maximum=65535),
             scheduler_enabled=_bool_env("PARSER_SCHEDULER_ENABLED", True),
             scheduler_poll_seconds=_float_env("PARSER_SCHEDULER_POLL_SECONDS", 15.0, minimum=1.0),
+            feed_retention_hours=_int_env("PARSER_FEED_RETENTION_HOURS", 96, minimum=1, maximum=24 * 365),
             audiopolka_base_url=os.environ.get("AUDIOPOLKA_BASE_URL", "https://audiopolka.club").strip(),
             audiopolka_backfill_pages=_int_env("AUDIOPOLKA_BACKFILL_PAGES", 5, minimum=0, maximum=200),
             audiopolka_delay_seconds=_float_env("AUDIOPOLKA_DELAY_SECONDS", 0.35),
