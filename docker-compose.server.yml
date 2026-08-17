@@ -58,7 +58,7 @@ services:
       TELEGRAM_POLL_TIMEOUT_SECONDS: ${TELEGRAM_POLL_TIMEOUT_SECONDS:-30}
       TELEGRAM_REQUEST_TIMEOUT_SECONDS: ${TELEGRAM_REQUEST_TIMEOUT_SECONDS:-30}
       TELEGRAM_LOG_LEVEL: ${TELEGRAM_LOG_LEVEL:-INFO}
-    command: ["python", "-m", "abred_catalog_pipeline.server.telegram_bot"]
+    command: ["python", "-m", "abred_catalog_pipeline.server.telegram_bot_entrypoint"]
     depends_on:
       parser-server:
         condition: service_healthy
