@@ -1,171 +1,117 @@
-# Abred Catalog Pipeline
+# Abred Parser Server
 
-Отдельный crawler/parser/feed producer для AudioBookRed.
+`server_parser-0.0.1` turns `abred-pars` into a long-running parser/feed producer for a dedicated server. GitHub is source control only; production crawling, schedules, cursor state and feed delivery do not depend on GitHub Actions or Actions artifacts.
 
-Текущая версия пакета: `0.1.4`.
+Server version: **0.0.1**.
 
-Producer не подключается к production PostgreSQL. Он читает внешние каталоги, формирует source-native `feed.json` + `manifest.json` и публикует GitHub Actions artifacts. Backend `ivzaislu/abred` отдельно валидирует и импортирует artifacts через `app.feed_auto`.
-
-Все bulk catalog crawler/parser/feed producer проекта находятся здесь. Backend не должен выполнять scheduled bulk crawl внешних каталогов.
-
-## Production schedules
+## Runtime shape
 
 ```text
-Uknig      каждый час в :07 UTC
-Audiopolka каждый час в :17 UTC
-RuTracker  каждые 2 часа в :47 UTC
+Audiopolka / Uknig / RuTracker
+              ↓
+      existing parser modules
+              ↓
+       feed.json + manifest.json
+              ↓
+ immutable ZIP + SQLite registry
+              ↓
+      read-only parser API
+              ↓
+         Abred backend
 ```
 
-Schedules разведены по минутам. Producer cron и Backend `feed_auto` — независимые механизмы: наличие artifact producer schedule не доказывает, что конкретный Backend source уже enabled/READY.
+The parser server has no production Abred PostgreSQL credentials. The backend pulls feeds and keeps responsibility for its own validation, dry-run and catalog import.
 
-## Общий artifact/state contract
+## Sources and schedules
 
-Для scheduled producer действует порядок:
+Default UTC schedules keep the current production cadence:
 
 ```text
-tests/preflight
-→ crawl/parse
-→ feed.json + manifest.json
-→ source/feed audit
-→ upload Actions artifact
-→ persist cursor/cache state
+Uknig      hourly at :07
+Audiopolka hourly at :17
+RuTracker  every 2 hours at :47
 ```
 
-Если upload artifact не удался, cursor state не должен продвигаться.
+The scheduler is part of the server process and can be disabled when systemd timers are preferred.
 
-Artifacts:
-
-```text
-audiopolka-feed-<github-run-id>
-rutracker-feed-<github-run-id>
-uknig-feed-<github-run-id>
-```
-
-Production feed retention: 14 дней.
-
-## Audiopolka
-
-Workflow: `.github/workflows/audiopolka.yml`.
-
-Расписание: каждый час в `:17 UTC`.
-
-Scheduled crawl обрабатывает актуальную page 1 и finite descending bootstrap. Cursor хранится в `state/audiopolka.json`.
+## Start with Docker
 
 ```bash
-python -m abred_catalog_pipeline run-audiopolka \
-  --state state/audiopolka.json \
-  --out artifacts
+cp .env.server.example .env.server
+# Set PARSER_API_TOKEN and RuTracker/TorrServer settings.
+
+docker compose --env-file .env.server -f docker-compose.server.yml up -d --build
 ```
+
+The compose file binds to `127.0.0.1:8081` by default. For a backend on another host, expose it only through a private network/VPN or an authenticated TLS reverse proxy.
+
+## API
+
+Health is public:
+
+```text
+GET /health
+```
+
+All `/v1/*` routes require `Authorization: Bearer <PARSER_API_TOKEN>` or `X-Parser-Token`:
+
+```text
+GET /v1/sources
+GET /v1/feeds?source=uknig&after=0&limit=50
+GET /v1/feeds/{feed_id}
+GET /v1/feeds/{feed_id}/bundle
+GET /v1/runs?source=uknig&limit=20
+```
+
+The API is intentionally read-only. It has no endpoint for remotely starting expensive crawls.
+
+## Local CLI
+
+```bash
+abred-parser-server run uknig
+abred-parser-server run audiopolka
+abred-parser-server run rutracker
+abred-parser-server status
+abred-parser-server list-feeds --source uknig
+abred-parser-server serve
+abred-parser-server scheduler
+```
+
+Manual parser runs do not require the API token. Serving the API does.
+
+## Durable storage
+
+Operational data lives below `PARSER_DATA_DIR` (default `/data`):
+
+```text
+server.sqlite3       feed registry, run history, scheduler claims
+state/*.json         existing durable crawler cursors
+feeds/<source>/*.zip immutable feed bundles
+staging/             temporary run output
+locks/               per-source process locks
+```
+
+A server run publishes an immutable bundle before advancing the source cursor. This preserves the existing producer invariant that operational state cannot move past source data that was never durably published.
 
 ## RuTracker
 
-Workflow: `.github/workflows/rutracker.yml`.
+RuTracker keeps the existing Worker transport and TorrServer enrichment/pool. Server mode expects `RUTRACKER_WORKER_URL`; when `RUTRACKER_TORRSERVER_ENRICH=true`, at least `TORRSERVER_URL` must be configured and `TORRSERVER_URL_2` remains optional.
 
-Расписание: каждые 2 часа в `:47 UTC`.
+## Backend integration
 
-Весь HTTP-трафик к RuTracker идёт через project Worker. Scheduled runs используют TorrServer enrichment для torrent metadata/files и chapters.
+The backend should replace GitHub artifact discovery with a feed provider that polls `/v1/feeds`, downloads the oldest unseen bundle, verifies the transport SHA plus the existing manifest SHA, then runs the same backend source-policy validation, dry-run and locked import used today.
 
-Required Worker settings:
+Detailed deployment and migration notes: [`SERVER_PARSER.md`](SERVER_PARSER.md).
 
-```text
-RUTRACKER_WORKER_URL
-RUTRACKER_WORKER_TOKEN
-RUTRACKER_WORKER_TOKEN_HEADER   default X-Proxy-Token
-RUTRACKER_WORKER_MODE           default mirror
-```
+## GitHub Actions
 
-Transient Worker transport errors, HTTP `429` и `5xx` имеют bounded retry. Обычные non-retriable `4xx` завершаются без retry.
+No GitHub Actions workflow is used by this server runtime. Existing workflow files remain under `.github/workflows-disabled` and are not enabled by this branch.
 
-### Два TorrServer
+## Tests
 
-`0.1.4` поддерживает pool:
-
-```text
-TORRSERVER_URL
-TORRSERVER_URL_2
-TORRSERVER_USERNAME
-TORRSERVER_PASSWORD
-```
-
-Credentials общие для обоих instances. Разные `info_hash` обрабатываются максимум двумя параллельными metadata jobs; RuTracker/Worker HTML остаётся последовательным.
-
-Pool использует least-in-flight scheduling. Один hash не отправляется одновременно на оба сервера. Timeout/network/HTTP `429`/`5xx` допускают один последовательный failover на второй сервер; structural metadata errors остаются blocking.
-
-Run statistics:
-
-```text
-torrent_metadata.servers[].attempted
-torrent_metadata.servers[].enriched
-torrent_metadata.servers[].failed
-torrent_metadata.failovers
-```
-
-Правила результата:
-
-- `unsupported audio` — permanent reject и не удерживает cursor;
-- временная Worker/TorrServer проблема удерживает cursor, если retry/failover исчерпан;
-- structural TorrServer metadata failure остаётся blocking;
-- truncated manual run не продвигает cursor.
-
-### Обложки RuTracker
-
-Static assets, smiles, badges, маленькие изображения и явно широкие декоративные полосы отбрасываются. При доступных размерах предпочитается portrait/book-like candidate; если безопасной обложки нет, `cover_url` остаётся пустым.
-
-## Uknig
-
-Uknig реализован отдельным package `abred_catalog_pipeline.uknig`.
-
-Catalog pages: `https://uknig.com/?p=<N>`. Stable source ID берётся из `/books/<id>`.
-
-Полная аудиокнига подтверждается только full playlist `/index.php/books/<id>/playlist.txt`.
-
-Availability rules:
-
-- `Прослушивание заблокировано правообладателем` → `rights_holder_blocked` tombstone;
-- явный ознакомительный/preview marker → `preview_only` tombstone;
-- пустой/недоступный full playlist → `preview_only`;
-- playable record обязан иметь непустые chapters;
-- production workflow дополнительно проверяет HTTPS media URL на `uknig.com`.
-
-Canary workflow: `.github/workflows/uknig-canary.yml`.
-
-Production workflow: `.github/workflows/uknig.yml`.
-
-Расписание: каждый час в `:07 UTC`. Пока bootstrap не завершён, scheduled run обрабатывает page 1 + 20 deep-backfill страниц. После завершения bootstrap cursor планирует page 1 only.
-
-```bash
-python -m abred_catalog_pipeline.uknig \
-  --state state/uknig.json \
-  --out artifacts \
-  --backfill-pages 20 \
-  --delay 0.35
-```
-
-## State
-
-```text
-state/audiopolka.json
-state/rutracker.json
-state/uknig.json
-```
-
-State сейчас хранится в Git и scheduled workflows коммитят его обратно в `main` только после artifact upload. Это надёжно с точки зрения cursor durability, но создаёт шумные bot commits; перенос operational state в отдельный durable storage/state branch внесён в roadmap.
-
-## Подтверждённый reliability debt
-
-Audiopolka и Uknig сейчас различают permanent availability outcomes и generic `detail_fetch_or_parse_error`, но при generic transient/error outcome всё равно формируют `cursor_after` и workflow сохраняет его после upload.
-
-Для deep bootstrap это риск пропуска книги после единичного timeout/5xx/неустойчивого parse: page может быть помечена пройденной, хотя отдельный detail не был успешно классифицирован.
-
-Следующий producer patch должен сделать transient uncertainty cursor-blocking либо сохранять durable retry queue. Permanent tombstones/rejects могут продолжать двигать cursor.
-
-## Тесты
+Deterministic tests remain available for local development:
 
 ```bash
 pip install -e '.[test]'
 pytest -q
 ```
-
-Deterministic unit/fixture tests должны оставаться основным PR gate. Live source canaries полезны отдельно, но не должны подменять deterministic regression suite.
-
-Следующая работа и подтверждённые cleanup-пункты: [`PATCH_ROADMAP.md`](PATCH_ROADMAP.md).

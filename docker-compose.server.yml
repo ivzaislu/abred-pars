@@ -1,0 +1,39 @@
+services:
+  parser-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    restart: unless-stopped
+    environment:
+      PARSER_DATA_DIR: /data
+      PARSER_API_TOKEN: ${PARSER_API_TOKEN:?PARSER_API_TOKEN is required}
+      PARSER_HOST: 0.0.0.0
+      PARSER_PORT: 8081
+      PARSER_SCHEDULER_ENABLED: ${PARSER_SCHEDULER_ENABLED:-true}
+
+      AUDIOPOLKA_BACKFILL_PAGES: ${AUDIOPOLKA_BACKFILL_PAGES:-5}
+      UKNIG_BACKFILL_PAGES: ${UKNIG_BACKFILL_PAGES:-20}
+
+      RUTRACKER_WORKER_URL: ${RUTRACKER_WORKER_URL:-}
+      RUTRACKER_WORKER_TOKEN: ${RUTRACKER_WORKER_TOKEN:-}
+      RUTRACKER_WORKER_TOKEN_HEADER: ${RUTRACKER_WORKER_TOKEN_HEADER:-X-Proxy-Token}
+      RUTRACKER_WORKER_MODE: ${RUTRACKER_WORKER_MODE:-mirror}
+      RUTRACKER_FORUMS: ${RUTRACKER_FORUMS:-}
+      RUTRACKER_TORRSERVER_ENRICH: ${RUTRACKER_TORRSERVER_ENRICH:-true}
+      TORRSERVER_URL: ${TORRSERVER_URL:-}
+      TORRSERVER_URL_2: ${TORRSERVER_URL_2:-}
+      TORRSERVER_USERNAME: ${TORRSERVER_USERNAME:-}
+      TORRSERVER_PASSWORD: ${TORRSERVER_PASSWORD:-}
+    volumes:
+      - parser_data:/data
+    ports:
+      - "${PARSER_BIND_ADDRESS:-127.0.0.1}:${PARSER_PUBLIC_PORT:-8081}:8081"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  parser_data:

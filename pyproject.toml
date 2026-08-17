@@ -4,12 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "abred-catalog-pipeline"
-version = "0.1.4"
-description = "GitHub-hosted catalog crawler/parser/feed pipeline for Abred"
+version = "0.0.1"
+description = "Server-hosted crawler/parser/feed producer for Abred"
 requires-python = ">=3.12"
 dependencies = [
   "beautifulsoup4>=4.12,<5",
+  "fastapi>=0.115,<1",
   "httpx>=0.27,<1",
+  "uvicorn[standard]>=0.32,<1",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +22,7 @@ test = [
 
 [project.scripts]
 abred-catalog-pipeline = "abred_catalog_pipeline.cli:main"
+abred-parser-server = "abred_catalog_pipeline.server.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
