@@ -7,7 +7,7 @@ import logging
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-from .telegram_bot import main
+from .telegram_bot_observability import main
 
 
 if __name__ == "__main__":

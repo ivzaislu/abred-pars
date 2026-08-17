@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -20,6 +21,8 @@ from ..uknig.parser import UknigParser
 from . import SUPPORTED_SOURCES
 from .config import ServerSettings
 from .storage import FeedRecord, ServerStorage
+
+logger = logging.getLogger("abred.parser.runner")
 
 try:
     import fcntl
@@ -62,6 +65,7 @@ class ParserRunner:
         async with self._process_locks[source]:
             with _source_file_lock(self.settings.locks_dir / f"{source}.lock") as acquired:
                 if not acquired:
+                    logger.info("parser run skipped source=%s reason=locked", source)
                     return {"source": source, "status": "LOCKED"}
                 return await self._run_locked(source)
 
@@ -70,6 +74,7 @@ class ParserRunner:
         staging = self.settings.staging_dir / f"{source}-{run_id}"
         staging.mkdir(parents=True, exist_ok=False)
         self.storage.start_run(run_id=run_id, source=source)
+        logger.info("parser run started source=%s run_id=%s", source, run_id)
         try:
             if source == "audiopolka":
                 record, stats = await self._run_audiopolka(run_id, staging)
@@ -83,6 +88,14 @@ class ParserRunner:
                 feed_id=record.feed_id,
                 stats=stats,
             )
+            logger.info(
+                "parser run completed source=%s run_id=%s feed_id=%s records=%s rejected=%s",
+                source,
+                run_id,
+                record.feed_id,
+                stats.get("records", 0),
+                stats.get("rejected", 0),
+            )
             return {
                 "source": source,
                 "status": "COMPLETED",
@@ -95,6 +108,12 @@ class ParserRunner:
                 run_id=run_id,
                 status="failed",
                 error=f"{type(exc).__name__}: {exc}",
+            )
+            logger.warning(
+                "parser run failed source=%s run_id=%s error_type=%s",
+                source,
+                run_id,
+                type(exc).__name__,
             )
             raise
         finally:
@@ -126,8 +145,6 @@ class ParserRunner:
             run_id=run_id,
             feeds_dir=self.settings.feeds_dir,
         )
-        # Feed publication is durable before cursor advancement. A crash before
-        # this point cannot make the producer skip unseen source data.
         save_cursor()
         return record
 

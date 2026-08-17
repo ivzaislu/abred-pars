@@ -9,12 +9,14 @@ from fastapi.responses import FileResponse
 
 from . import SERVER_VERSION, SUPPORTED_SOURCES
 from .config import ServerSettings
+from .ops_log_buffer import LOG_BUFFER, install_log_buffer
 from .runner import ParserRunner
 from .scheduler import ParserScheduler
 from .storage import ServerStorage
 
 
 def create_app(settings: ServerSettings | None = None) -> FastAPI:
+    install_log_buffer("abred")
     settings = settings or ServerSettings.from_env()
     settings.validate_api()
     settings.ensure_directories()
@@ -85,6 +87,14 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
         result["scheduler"] = scheduler.public_status()
         result["sources"] = [storage.source_status(source) for source in SUPPORTED_SOURCES]
         return result
+
+    @app.get("/v1/logs", dependencies=[Depends(require_token)])
+    def logs(limit: int = Query(default=40, ge=1, le=100)) -> dict:
+        return {
+            "scope": "parser-server-process",
+            "since_restart": True,
+            "logs": LOG_BUFFER.snapshot(limit=limit),
+        }
 
     @app.get("/v1/feeds", dependencies=[Depends(require_token)])
     def feeds(
