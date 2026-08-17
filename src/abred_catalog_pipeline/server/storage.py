@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import zipfile
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -216,6 +217,47 @@ class ServerStorage:
             raise RuntimeError("stored feed path escaped parser data directory")
         return path
 
+    def purge_expired_feeds(
+        self,
+        *,
+        retention_hours: int,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        hours = max(1, int(retention_hours))
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        cutoff = current.astimezone(timezone.utc) - timedelta(hours=hours)
+        cutoff_iso = cutoff.isoformat()
+        deleted = 0
+        deleted_bytes = 0
+        errors: list[dict[str, str]] = []
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM feeds WHERE created_at < ? ORDER BY cursor ASC",
+                (cutoff_iso,),
+            ).fetchall()
+            for row in rows:
+                feed = self._feed_from_row(row)
+                path = self.bundle_path(feed)
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    errors.append({"feed_id": feed.feed_id, "error": str(exc)[:500]})
+                    continue
+                conn.execute("DELETE FROM feeds WHERE cursor=?", (feed.cursor,))
+                deleted += 1
+                deleted_bytes += feed.bundle_bytes
+
+        return {
+            "retention_hours": hours,
+            "cutoff": cutoff_iso,
+            "deleted": deleted,
+            "deleted_bytes": deleted_bytes,
+            "errors": errors,
+        }
+
     def recent_runs(self, *, source: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         with self._connect() as conn:
             if source:
@@ -242,17 +284,75 @@ class ServerStorage:
     def source_status(self, source: str) -> dict[str, Any]:
         runs = self.recent_runs(source=source, limit=1)
         with self._connect() as conn:
-            feed_count = int(conn.execute(
-                "SELECT COUNT(*) FROM feeds WHERE source=?", (source,)
-            ).fetchone()[0])
+            aggregate = conn.execute(
+                "SELECT COUNT(*) AS feed_count, COALESCE(SUM(bundle_bytes), 0) AS feed_bytes FROM feeds WHERE source=?",
+                (source,),
+            ).fetchone()
             row = conn.execute(
                 "SELECT * FROM feeds WHERE source=? ORDER BY cursor DESC LIMIT 1", (source,)
             ).fetchone()
         return {
             "source": source,
-            "feed_count": feed_count,
+            "feed_count": int(aggregate["feed_count"]),
+            "feed_bytes": int(aggregate["feed_bytes"]),
             "last_feed": self._feed_from_row(row).public_dict() if row is not None else None,
             "last_run": runs[0] if runs else None,
+        }
+
+    def statistics(self, *, retention_hours: int) -> dict[str, Any]:
+        hours = max(1, int(retention_hours))
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cutoff_iso = cutoff.isoformat()
+        with self._connect() as conn:
+            feed_summary = conn.execute(
+                """
+                SELECT COUNT(*) AS feed_count,
+                       COALESCE(SUM(bundle_bytes), 0) AS bundle_bytes,
+                       MIN(created_at) AS oldest_created_at,
+                       MAX(created_at) AS newest_created_at
+                FROM feeds
+                """
+            ).fetchone()
+            expired_count = int(conn.execute(
+                "SELECT COUNT(*) FROM feeds WHERE created_at < ?", (cutoff_iso,)
+            ).fetchone()[0])
+            run_total = int(conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0])
+            run_rows = conn.execute(
+                "SELECT status, COUNT(*) AS count FROM runs GROUP BY status ORDER BY status"
+            ).fetchall()
+            bundle_rows = conn.execute("SELECT * FROM feeds ORDER BY cursor").fetchall()
+
+        missing_bundles = 0
+        for row in bundle_rows:
+            if not self.bundle_path(self._feed_from_row(row)).is_file():
+                missing_bundles += 1
+
+        disk = shutil.disk_usage(self.data_dir)
+        return {
+            "generated_at": utcnow_iso(),
+            "retention": {
+                "hours": hours,
+                "days": hours / 24,
+                "cutoff": cutoff_iso,
+                "expired_pending_purge": expired_count,
+            },
+            "feeds": {
+                "count": int(feed_summary["feed_count"]),
+                "bundle_bytes": int(feed_summary["bundle_bytes"]),
+                "missing_bundles": missing_bundles,
+                "oldest_created_at": feed_summary["oldest_created_at"],
+                "newest_created_at": feed_summary["newest_created_at"],
+            },
+            "runs": {
+                "total": run_total,
+                "by_status": {str(row["status"]): int(row["count"]) for row in run_rows},
+            },
+            "disk": {
+                "path": str(self.data_dir),
+                "total_bytes": int(disk.total),
+                "used_bytes": int(disk.used),
+                "free_bytes": int(disk.free),
+            },
         }
 
     def publish_bundle(self, *, staging_dir: Path, source: str, run_id: str, feeds_dir: Path) -> FeedRecord:
