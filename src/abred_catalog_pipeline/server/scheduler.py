@@ -21,6 +21,13 @@ class SourceSchedule:
     def due(self, now: datetime) -> bool:
         return now.minute == self.minute and now.hour % self.every_hours == 0
 
+    def public_dict(self) -> dict[str, int | str]:
+        return {
+            "source": self.source,
+            "minute_utc": self.minute,
+            "every_hours": self.every_hours,
+        }
+
 
 class ParserScheduler:
     def __init__(self, settings: ServerSettings, storage: ServerStorage, runner: ParserRunner):
@@ -38,9 +45,25 @@ class ParserScheduler:
         )
         self._tasks: set[asyncio.Task] = set()
 
+    def public_status(self) -> dict:
+        return {
+            "enabled": self.settings.scheduler_enabled,
+            "poll_seconds": self.settings.scheduler_poll_seconds,
+            "schedules": [schedule.public_dict() for schedule in self.schedules],
+        }
+
     async def run_forever(self) -> None:
         while True:
             now = datetime.now(timezone.utc)
+            maintenance_slot = now.strftime("%Y-%m-%dT%HZ")
+            if self.storage.claim_schedule_slot(source="__retention__", slot=maintenance_slot):
+                result = self.storage.purge_expired_feeds(
+                    retention_hours=self.settings.feed_retention_hours,
+                    now=now,
+                )
+                if result["deleted"] or result["errors"]:
+                    logger.info("feed retention cleanup: %s", result)
+
             slot = now.strftime("%Y-%m-%dT%H:%MZ")
             for schedule in self.schedules:
                 if not schedule.due(now):
