@@ -41,5 +41,27 @@ services:
       retries: 3
       start_period: 15s
 
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    restart: unless-stopped
+    profiles: ["telegram"]
+    environment:
+      PARSER_API_TOKEN: ${PARSER_API_TOKEN:?PARSER_API_TOKEN is required}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}
+      TELEGRAM_ALLOWED_USER_IDS: ${TELEGRAM_ALLOWED_USER_IDS:-}
+      TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS:-}
+      TELEGRAM_PARSER_URL: ${TELEGRAM_PARSER_URL:-http://parser-server:8081}
+      TELEGRAM_BACKEND_URL: ${TELEGRAM_BACKEND_URL:?TELEGRAM_BACKEND_URL is required}
+      TELEGRAM_BACKEND_TOKEN: ${TELEGRAM_BACKEND_TOKEN:?TELEGRAM_BACKEND_TOKEN is required}
+      TELEGRAM_POLL_TIMEOUT_SECONDS: ${TELEGRAM_POLL_TIMEOUT_SECONDS:-30}
+      TELEGRAM_REQUEST_TIMEOUT_SECONDS: ${TELEGRAM_REQUEST_TIMEOUT_SECONDS:-30}
+      TELEGRAM_LOG_LEVEL: ${TELEGRAM_LOG_LEVEL:-INFO}
+    command: ["python", "-m", "abred_catalog_pipeline.server.telegram_bot"]
+    depends_on:
+      parser-server:
+        condition: service_healthy
+
 volumes:
   parser_data:
