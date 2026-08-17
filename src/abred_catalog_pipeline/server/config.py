@@ -111,7 +111,7 @@ class ServerSettings:
             torrserver_password=os.environ.get("TORRSERVER_PASSWORD", ""),
             torrserver_timeout_seconds=_float_env("TORRSERVER_TIMEOUT_SECONDS", 30.0, minimum=1.0),
             torrserver_poll_interval_seconds=_float_env("TORRSERVER_POLL_INTERVAL_SECONDS", 1.0, minimum=0.1),
-            torrserver_replay_successes=_int_env("TORRSERVER_REPLAY_SUCCESSES", 2, minimum=1, maximum=20),
+            torrserver_replay_successes=_int_env("TORRSERVER_REPLAY_SUCCESSES", 1, minimum=1, maximum=20),
         )
 
     @property
