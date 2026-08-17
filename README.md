@@ -1,6 +1,8 @@
 # Abred Parser Server
 
-`server_parser-0.0.1` turns `abred-pars` into a long-running parser/feed producer for a dedicated server. GitHub is source control only; production crawling, schedules, cursor state and feed delivery do not depend on GitHub Actions or Actions artifacts.
+`server_parser-0.0.1` is the production catalog producer for Abred. GitHub is
+source control only: crawling, schedules, durable cursor state and feed delivery
+do not use GitHub Actions or Actions artifacts.
 
 Server version: **0.0.1**.
 
@@ -9,7 +11,7 @@ Server version: **0.0.1**.
 ```text
 Audiopolka / Uknig / RuTracker
               ↓
-      existing parser modules
+       parser modules
               ↓
        feed.json + manifest.json
               ↓
@@ -20,11 +22,12 @@ Audiopolka / Uknig / RuTracker
          Abred backend
 ```
 
-The parser server has no production Abred PostgreSQL credentials. The backend pulls feeds and keeps responsibility for its own validation, dry-run and catalog import.
+The parser server has no production Abred PostgreSQL credentials. Backend pulls
+feeds and remains responsible for validation, dry-run and catalog import.
 
 ## Sources and schedules
 
-Default UTC schedules keep the current production cadence:
+Default UTC schedules:
 
 ```text
 Uknig      hourly at :07
@@ -32,18 +35,18 @@ Audiopolka hourly at :17
 RuTracker  every 2 hours at :47
 ```
 
-The scheduler is part of the server process and can be disabled when systemd timers are preferred.
-
 ## Start with Docker
 
 ```bash
 cp .env.server.example .env.server
-# Set PARSER_API_TOKEN and RuTracker/TorrServer settings.
+# Set PARSER_API_TOKEN and source/TorrServer settings.
 
 docker compose --env-file .env.server -f docker-compose.server.yml up -d --build
 ```
 
-The compose file binds to `127.0.0.1:8081` by default. For a backend on another host, expose it only through a private network/VPN or an authenticated TLS reverse proxy.
+The compose file binds to `127.0.0.1:8081` by default. For a Backend on another
+host, expose the API only through a private network/VPN or an authenticated TLS
+reverse proxy.
 
 ## API
 
@@ -53,31 +56,20 @@ Health is public:
 GET /health
 ```
 
-All `/v1/*` routes require `Authorization: Bearer <PARSER_API_TOKEN>` or `X-Parser-Token`:
+All `/v1/*` routes require `Authorization: Bearer <PARSER_API_TOKEN>` or
+`X-Parser-Token`:
 
 ```text
 GET /v1/sources
+GET /v1/stats
 GET /v1/feeds?source=uknig&after=0&limit=50
 GET /v1/feeds/{feed_id}
 GET /v1/feeds/{feed_id}/bundle
 GET /v1/runs?source=uknig&limit=20
 ```
 
-The API is intentionally read-only. It has no endpoint for remotely starting expensive crawls.
-
-## Local CLI
-
-```bash
-abred-parser-server run uknig
-abred-parser-server run audiopolka
-abred-parser-server run rutracker
-abred-parser-server status
-abred-parser-server list-feeds --source uknig
-abred-parser-server serve
-abred-parser-server scheduler
-```
-
-Manual parser runs do not require the API token. Serving the API does.
+The API is intentionally read-only. It has no endpoint for remotely starting
+expensive crawls.
 
 ## Durable storage
 
@@ -85,31 +77,53 @@ Operational data lives below `PARSER_DATA_DIR` (default `/data`):
 
 ```text
 server.sqlite3       feed registry, run history, scheduler claims
-state/*.json         existing durable crawler cursors
+state/*.json         durable crawler cursors/state
 feeds/<source>/*.zip immutable feed bundles
 staging/             temporary run output
 locks/               per-source process locks
 ```
 
-A server run publishes an immutable bundle before advancing the source cursor. This preserves the existing producer invariant that operational state cannot move past source data that was never durably published.
+A source cursor advances only after its immutable ZIP has been durably published
+and registered. Feed retention defaults to 96 hours.
 
 ## RuTracker
 
-RuTracker keeps the existing Worker transport and TorrServer enrichment/pool. Server mode expects `RUTRACKER_WORKER_URL`; when `RUTRACKER_TORRSERVER_ENRICH=true`, at least `TORRSERVER_URL` must be configured and `TORRSERVER_URL_2` remains optional.
+RuTracker uses the Worker transport and TorrServer enrichment pool.
+`TORRSERVER_URL_2` is optional parallel/failover capacity. One successful
+TorrServer metadata result is sufficient.
+
+Transient per-topic failures are stored durably in the RuTracker retry queue and
+do not hold the deep cursor.
 
 ## Backend integration
 
-The backend should replace GitHub artifact discovery with a feed provider that polls `/v1/feeds`, downloads the oldest unseen bundle, verifies the transport SHA plus the existing manifest SHA, then runs the same backend source-policy validation, dry-run and locked import used today.
+Parser-server is the **sole** catalog-feed transport for Backend. Backend:
 
-Detailed deployment and migration notes: [`SERVER_PARSER.md`](SERVER_PARSER.md).
+1. requests feeds after its per-source cursor;
+2. consumes the oldest visible feed first;
+3. downloads the immutable ZIP;
+4. verifies transport and manifest SHA-256;
+5. performs source/RuTracker preflight and DB dry-run;
+6. imports under its catalog mutation lock;
+7. advances its cursor only after successful apply.
+
+There is no GitHub artifact fallback and no Backend repository/artifact selector.
+
+Detailed contract: [`SERVER_PARSER.md`](SERVER_PARSER.md).
+
+## Telegram operations bot
+
+The optional `telegram-bot` Compose profile runs on the parser host. It provides
+allowlisted status, parser/backend logs and bounded Backend feed-control actions.
+It has no Docker socket or arbitrary shell access. Backend requests use a
+dedicated HMAC secret.
 
 ## GitHub Actions
 
-No GitHub Actions workflow is used by this server runtime. Existing workflow files remain under `.github/workflows-disabled` and are not enabled by this branch.
+No GitHub Actions workflow is used by the parser runtime. Existing workflow files
+remain under `.github/workflows-disabled`.
 
 ## Tests
-
-Deterministic tests remain available for local development:
 
 ```bash
 pip install -e '.[test]'
