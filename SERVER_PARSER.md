@@ -107,6 +107,8 @@ curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8081/v1/stats
 
 A healthy server should normally show `missing_bundles: 0`, no long-lived `running` runs, recent `last_run`/`last_feed` values for enabled sources, and enough `disk.free_bytes` for the four-day retention window.
 
+For RuTracker, inspect `sources[].last_run.stats.torrent_metadata.retry_queue`. It reports queued-topic retry attempts, resolutions, repeated failures, permanent rejects, newly queued topics, and the current pending count. A persistent or growing `pending` value means individual topics need operator attention, but it no longer freezes the deep backfill cursor.
+
 ## Local operations
 
 ```bash
@@ -124,6 +126,8 @@ A manual `run` does not require `PARSER_API_TOKEN`; `serve` does.
 ## RuTracker
 
 RuTracker still uses the existing Worker transport and TorrServer enrichment. Server mode expects `RUTRACKER_WORKER_URL`. With `RUTRACKER_TORRSERVER_ENRICH=true` (the default), at least `TORRSERVER_URL` must be configured; `TORRSERVER_URL_2` remains optional for pool/failover and parallel metadata work. One successful TorrServer metadata result is sufficient (`TORRSERVER_REPLAY_SUCCESSES=1`).
+
+Transient per-topic failures, including TorrServer metadata failures, are stored durably in `topic_retry_queue` inside `/data/state/rutracker.json`. They do not hold the forum deep cursor. At the beginning of each later RuTracker run, queued topics are fetched directly and retried with the same TorrServer pool parallelism; a successful retry is emitted in that new feed and removed from the queue. Permanently unsupported audio is rejected without entering the retry queue. Retry entries keep `attempts`, `last_error`, and `last_attempt_at`; there is deliberately no automatic attempt limit, so a topic is never silently dropped because it failed too many times.
 
 ## Backend migration
 
