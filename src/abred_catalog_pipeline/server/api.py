@@ -20,6 +20,7 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
     settings.ensure_directories()
     storage = ServerStorage(db_path=settings.db_path, data_dir=settings.data_dir)
     storage.initialize()
+    storage.purge_expired_feeds(retention_hours=settings.feed_retention_hours)
     runner = ParserRunner(settings, storage)
     scheduler = ParserScheduler(settings, storage, runner)
 
@@ -69,6 +70,7 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
             "service": "abred-parser-server",
             "version": SERVER_VERSION,
             "scheduler_enabled": settings.scheduler_enabled,
+            "feed_retention_hours": settings.feed_retention_hours,
         }
 
     @app.get("/v1/sources", dependencies=[Depends(require_token)])
@@ -76,6 +78,13 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
         return {
             "sources": [storage.source_status(source) for source in SUPPORTED_SOURCES],
         }
+
+    @app.get("/v1/stats", dependencies=[Depends(require_token)])
+    def stats() -> dict:
+        result = storage.statistics(retention_hours=settings.feed_retention_hours)
+        result["scheduler"] = scheduler.public_status()
+        result["sources"] = [storage.source_status(source) for source in SUPPORTED_SOURCES]
+        return result
 
     @app.get("/v1/feeds", dependencies=[Depends(require_token)])
     def feeds(
