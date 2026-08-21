@@ -100,6 +100,17 @@ is enough. Transient topic/TorrServer failures are stored durably in
 last run/feed. Telegram Ops Bot can show the same operational status plus
 sanitized bounded logs.
 
+## Production deployment runbook
+
+The current production host uses Ubuntu 18.04 and Docker installed through Snap,
+while the repository lives in `/opt/abred-pars`. The verified Russian operations
+runbook for this setup is [`SERVER_DEPLOY_RU.md`](SERVER_DEPLOY_RU.md).
+
+It documents the Snap-visible bind mount, persistent `abred-pars_parser_data`
+volume, backups, normal `git pull`, rebuild/start commands for both
+`parser-server` and `telegram-bot`, health checks and operations that must not
+remove persistent parser data.
+
 ## GitHub Actions
 
 No GitHub Actions workflow is required or enabled for this runtime. Workflow
