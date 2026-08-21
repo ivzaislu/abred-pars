@@ -44,6 +44,12 @@ cp .env.server.example .env.server
 docker compose --env-file .env.server -f docker-compose.server.yml up -d --build
 ```
 
+For the production Ubuntu 18.04 host with Docker installed through Snap, do not
+use the generic command above directly from `/opt`. Use the Russian operational
+runbook instead: [`SERVER_DEPLOY_RU.md`](SERVER_DEPLOY_RU.md). It contains the
+verified `/opt` bind-mount setup, backups, update procedure and the standard
+command for rebuilding and starting both `parser-server` and `telegram-bot`.
+
 The compose file binds to `127.0.0.1:8081` by default. For a Backend on another
 host, expose the API only through a private network/VPN or an authenticated TLS
 reverse proxy.
