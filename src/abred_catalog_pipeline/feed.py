@@ -7,10 +7,37 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = "abred.catalog.feed/v1"
+_PERSON_NAME_SAFETY_LIMIT = 500
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def _validate_backend_person_fields(records: list[dict[str, Any]]) -> None:
+    """Fail before feed publication when person metadata cannot fit Backend.
+
+    Backend stores author/narrator display names and identity keys in bounded
+    VARCHAR columns.  Keep a small amount of headroom below that boundary so a
+    parser bug cannot publish an immutable poison feed that Backend can never
+    dry-run successfully.  Do not truncate: a failed parser run keeps its
+    crawler cursor unchanged and can be retried after the parser is fixed.
+    """
+    for record_index, record in enumerate(records):
+        external_id = str(record.get("external_id") or "")
+        for field in ("authors", "narrators"):
+            values = record.get(field) or []
+            if not isinstance(values, list):
+                continue
+            for value_index, value in enumerate(values):
+                text = str(value or "").strip()
+                if len(text) <= _PERSON_NAME_SAFETY_LIMIT:
+                    continue
+                raise ValueError(
+                    f"feed record[{record_index}] external_id={external_id!r} "
+                    f"{field}[{value_index}] exceeds person-name safety limit: "
+                    f"{len(text)} > {_PERSON_NAME_SAFETY_LIMIT}"
+                )
 
 
 def write_feed_bundle(
@@ -25,6 +52,8 @@ def write_feed_bundle(
     cursor_before: dict[str, Any],
     cursor_after: dict[str, Any],
 ) -> dict[str, Any]:
+    _validate_backend_person_fields(records)
+
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     generated_at = datetime.now(timezone.utc).isoformat()
